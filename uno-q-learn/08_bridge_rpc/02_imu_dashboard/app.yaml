@@ -1,0 +1,6 @@
+name: imu-dashboard
+description: "IMU 运动仪表盘 - MPU6050 卡尔曼滤波 + Three.js 3D 可视化"
+ports: []
+bricks:
+- arduino:web_ui: {}
+icon: 🎯

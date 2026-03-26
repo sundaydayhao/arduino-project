@@ -1,0 +1,6 @@
+name: ai-inference-dashboard
+description: "AI 推理仪表盘 - TFLite 手势识别结果实时可视化"
+ports: []
+bricks:
+- arduino:web_ui: {}
+icon: 🤖

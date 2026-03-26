@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arduino UNO Q - 环境监测站</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, Arial, sans-serif; background: #0f172a; color: #e2e8f0; padding: 16px; }
+  h1 { color: #38bdf8; margin-bottom: 4px; font-size: 1.4em; }
+  .subtitle { color: #64748b; font-size: 0.85em; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 16px; text-align: center; border: 1px solid #334155; }
+  .card .icon { font-size: 2em; margin-bottom: 4px; }
+  .card .label { color: #94a3b8; font-size: 0.75em; text-transform: uppercase; letter-spacing: 1px; }
+  .card .value { font-size: 1.8em; font-weight: 700; margin: 4px 0; }
+  .card .unit { color: #64748b; font-size: 0.8em; }
+  .card.warn .value { color: #f59e0b; }
+  .card.danger .value { color: #ef4444; }
+  .card.good .value { color: #22c55e; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .chart-box { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
+  .chart-box h3 { color: #94a3b8; font-size: 0.85em; margin-bottom: 8px; }
+  .alerts { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
+  .alerts h3 { color: #94a3b8; font-size: 0.85em; margin-bottom: 8px; }
+  .alert-item { padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; font-size: 0.85em; }
+  .alert-item.warning { background: #451a03; color: #fbbf24; }
+  .alert-item.danger  { background: #450a0a; color: #f87171; }
+  .status-bar { display: flex; justify-content: space-between; color: #475569; font-size: 0.75em; margin-top: 12px; }
+  @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>🌿 Arduino UNO Q — 环境监测站</h1>
+<p class="subtitle" id="subtitle">Qualcomm MCU → Bridge → Linux MPU → REST API → Web</p>
+
+<div class="grid">
+  <div class="card" id="card-temp">
+    <div class="icon">🌡️</div>
+    <div class="label">温度</div>
+    <div class="value" id="val-temp">--</div>
+    <div class="unit">°C</div>
+  </div>
+  <div class="card" id="card-humi">
+    <div class="icon">💧</div>
+    <div class="label">湿度</div>
+    <div class="value" id="val-humi">--</div>
+    <div class="unit">%</div>
+  </div>
+  <div class="card" id="card-pres">
+    <div class="icon">🌬️</div>
+    <div class="label">气压</div>
+    <div class="value" id="val-pres">--</div>
+    <div class="unit">hPa</div>
+  </div>
+  <div class="card" id="card-light">
+    <div class="icon">☀️</div>
+    <div class="label">光照</div>
+    <div class="value" id="val-light">--</div>
+    <div class="unit">lux</div>
+  </div>
+  <div class="card" id="card-aqi">
+    <div class="icon">🍃</div>
+    <div class="label">空气质量</div>
+    <div class="value" id="val-aqi">--</div>
+    <div class="unit" id="val-aqi-level">AQI</div>
+  </div>
+  <div class="card" id="card-alt">
+    <div class="icon">⛰️</div>
+    <div class="label">海拔</div>
+    <div class="value" id="val-alt">--</div>
+    <div class="unit">m</div>
+  </div>
+</div>
+
+<div class="charts">
+  <div class="chart-box">
+    <h3>🌡️ 温度历史 (°C)</h3>
+    <canvas id="chart-temp" height="120"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>💧 湿度历史 (%)</h3>
+    <canvas id="chart-humi" height="120"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>☀️ 光照历史 (lux)</h3>
+    <canvas id="chart-light" height="120"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>🍃 AQI 历史</h3>
+    <canvas id="chart-aqi" height="120"></canvas>
+  </div>
+</div>
+
+<div class="alerts">
+  <h3>⚠️ 告警记录</h3>
+  <div id="alerts-list"><span style="color:#475569">暂无告警</span></div>
+</div>
+
+<div class="status-bar">
+  <span id="status-updated">最后更新: --</span>
+  <span id="status-count">采样次数: --</span>
+  <span>Arduino UNO Q (Qualcomm)</span>
+</div>
+
+<script>
+// ===== 图表初始化 =====
+const chartCfg = (label, color) => ({
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], borderColor: color,
+    backgroundColor: color + '22', fill: true, tension: 0.4, pointRadius: 2 }] },
+  options: { animation: false, plugins: { legend: { display: false } },
+    scales: { x: { display: false }, y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } } } }
+});
+
+const charts = {
+  temp:  new Chart(document.getElementById('chart-temp'),  chartCfg('温度', '#f87171')),
+  humi:  new Chart(document.getElementById('chart-humi'),  chartCfg('湿度', '#38bdf8')),
+  light: new Chart(document.getElementById('chart-light'), chartCfg('光照', '#fbbf24')),
+  aqi:   new Chart(document.getElementById('chart-aqi'),   chartCfg('AQI',  '#a78bfa')),
+};
+
+function updateChart(chart, labels, data) {
+  chart.data.labels = labels.map((t, i) => i % 10 === 0 ? t.slice(11, 19) : '');
+  chart.data.datasets[0].data = data;
+  chart.update('none');
+}
+
+// ===== 状态更新 =====
+function setCard(id, value, decimals = 1) {
+  const el = document.getElementById('val-' + id);
+  if (el) el.textContent = value == null ? '--' : Number(value).toFixed(decimals);
+}
+
+function setCardClass(cardId, cls) {
+  const card = document.getElementById('card-' + cardId);
+  if (card) { card.className = 'card ' + cls; }
+}
+
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+
+    setCard('temp',  s.temperature, 1);
+    setCard('humi',  s.humidity,    0);
+    setCard('pres',  s.pressure,    1);
+    setCard('light', s.light,       0);
+    setCard('aqi',   s.aqi,         0);
+    setCard('alt',   s.altitude,    1);
+
+    document.getElementById('val-aqi-level').textContent = s.aqi_level || 'AQI';
+
+    // 颜色状态
+    setCardClass('temp',  s.temperature > 35 ? 'warn' : s.temperature < 0 ? 'warn' : 'good');
+    setCardClass('humi',  s.humidity > 80 ? 'warn' : 'good');
+    setCardClass('aqi',   s.aqi > 200 ? 'danger' : s.aqi > 100 ? 'warn' : 'good');
+
+    if (s.updated_at) {
+      const d = new Date(s.updated_at);
+      document.getElementById('status-updated').textContent = '最后更新: ' + d.toLocaleTimeString();
+    }
+    document.getElementById('status-count').textContent = '采样次数: ' + (s.sample_count || 0);
+  } catch(e) { /* ignore */ }
+}
+
+async function refreshHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const h = await r.json();
+    updateChart(charts.temp,  h.timestamps, h.temperature);
+    updateChart(charts.humi,  h.timestamps, h.humidity);
+    updateChart(charts.light, h.timestamps, h.light);
+    updateChart(charts.aqi,   h.timestamps, h.aqi);
+  } catch(e) { /* ignore */ }
+}
+
+async function refreshAlerts() {
+  try {
+    const r = await fetch('/api/alerts', { cache: 'no-store' });
+    const d = await r.json();
+    const el = document.getElementById('alerts-list');
+    if (!d.alerts || d.alerts.length === 0) {
+      el.innerHTML = '<span style="color:#475569">暂无告警</span>';
+    } else {
+      el.innerHTML = d.alerts.map(a =>
+        `<div class="alert-item ${a.level}">[${a.time}] ${a.msg}</div>`
+      ).join('');
+    }
+  } catch(e) { /* ignore */ }
+}
+
+// ===== 定时刷新 =====
+refreshState(); refreshHistory(); refreshAlerts();
+setInterval(refreshState,  1000);
+setInterval(refreshHistory, 5000);
+setInterval(refreshAlerts,  3000);
+</script>
+</body>
+</html>

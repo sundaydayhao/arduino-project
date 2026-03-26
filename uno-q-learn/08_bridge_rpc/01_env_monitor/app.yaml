@@ -1,0 +1,6 @@
+name: env-monitor
+description: "环境监测站 - 温湿度/气压/光照/空气质量实时仪表盘"
+ports: []
+bricks:
+- arduino:web_ui: {}
+icon: 🌿

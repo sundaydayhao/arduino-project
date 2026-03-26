@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arduino UNO Q - IMU 仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, Arial, sans-serif; background: #0f172a; color: #e2e8f0; padding: 16px; }
+  h1 { color: #a78bfa; margin-bottom: 4px; font-size: 1.4em; }
+  .subtitle { color: #64748b; font-size: 0.85em; margin-bottom: 16px; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
+  .panel h3 { color: #94a3b8; font-size: 0.85em; margin-bottom: 12px; }
+  #canvas3d { width: 100%; height: 280px; border-radius: 8px; background: #0f172a; }
+  .angles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+  .angle-card { background: #0f172a; border-radius: 8px; padding: 10px; text-align: center; }
+  .angle-card .label { color: #64748b; font-size: 0.7em; text-transform: uppercase; }
+  .angle-card .value { font-size: 1.6em; font-weight: 700; }
+  .roll-val  { color: #f87171; }
+  .pitch-val { color: #34d399; }
+  .yaw-val   { color: #60a5fa; }
+  .accel-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .accel-item { background: #0f172a; border-radius: 8px; padding: 8px; text-align: center; }
+  .accel-item .label { color: #64748b; font-size: 0.7em; }
+  .accel-item .value { font-size: 1.2em; font-weight: 600; color: #fbbf24; }
+  .motion-list { max-height: 150px; overflow-y: auto; }
+  .motion-item { padding: 4px 8px; border-radius: 4px; margin-bottom: 3px;
+                 background: #0f172a; font-size: 0.8em; color: #fbbf24; }
+  @media (max-width: 700px) { .layout { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>🎯 Arduino UNO Q — IMU 运动仪表盘</h1>
+<p class="subtitle">MPU6050 卡尔曼滤波 → Bridge → Linux MPU → Three.js 3D 可视化</p>
+
+<div class="layout">
+  <!-- 3D 可视化 -->
+  <div class="panel">
+    <h3>🎲 3D 姿态可视化 (Three.js)</h3>
+    <canvas id="canvas3d"></canvas>
+    <div class="angles">
+      <div class="angle-card">
+        <div class="label">Roll (X)</div>
+        <div class="value roll-val" id="val-roll">0.0°</div>
+      </div>
+      <div class="angle-card">
+        <div class="label">Pitch (Y)</div>
+        <div class="value pitch-val" id="val-pitch">0.0°</div>
+      </div>
+      <div class="angle-card">
+        <div class="label">Yaw (Z)</div>
+        <div class="value yaw-val" id="val-yaw">0.0°</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 数据面板 -->
+  <div>
+    <div class="panel" style="margin-bottom:12px">
+      <h3>📊 加速度 (m/s²)</h3>
+      <div class="accel-grid">
+        <div class="accel-item"><div class="label">X</div><div class="value" id="val-ax">0.00</div></div>
+        <div class="accel-item"><div class="label">Y</div><div class="value" id="val-ay">0.00</div></div>
+        <div class="accel-item"><div class="label">Z</div><div class="value" id="val-az">0.00</div></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px">
+      <h3>🌀 陀螺仪 (rad/s)</h3>
+      <div class="accel-grid">
+        <div class="accel-item"><div class="label">GX</div><div class="value" id="val-gx">0.00</div></div>
+        <div class="accel-item"><div class="label">GY</div><div class="value" id="val-gy">0.00</div></div>
+        <div class="accel-item"><div class="label">GZ</div><div class="value" id="val-gz">0.00</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>⚡ 运动事件</h3>
+      <div class="motion-list" id="motion-list">
+        <span style="color:#475569">等待运动...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 历史图表 -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+  <div class="panel">
+    <h3>📈 Roll/Pitch 历史</h3>
+    <canvas id="chart-angles" height="100"></canvas>
+  </div>
+  <div class="panel">
+    <h3>📈 合加速度历史</h3>
+    <canvas id="chart-accel" height="100"></canvas>
+  </div>
+</div>
+
+<script>
+// ===== Three.js 3D 可视化 =====
+const canvas = document.getElementById('canvas3d');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 100);
+camera.position.set(0, 1.5, 3);
+camera.lookAt(0, 0, 0);
+
+// 环境光
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, 5, 5);
+scene.add(dirLight);
+
+// 开发板模型（简化为长方体）
+const boardGeo = new THREE.BoxGeometry(2, 0.1, 2.8);
+const boardMat = new THREE.MeshPhongMaterial({ color: 0x1a5c2a });
+const board = new THREE.Mesh(boardGeo, boardMat);
+scene.add(board);
+
+// 坐标轴
+const axesHelper = new THREE.AxesHelper(1.5);
+scene.add(axesHelper);
+
+// 网格
+const grid = new THREE.GridHelper(6, 6, 0x334155, 0x1e293b);
+grid.position.y = -1;
+scene.add(grid);
+
+// 目标姿态（平滑插值）
+let targetRoll = 0, targetPitch = 0, targetYaw = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  // 平滑插值
+  const alpha = 0.15;
+  board.rotation.x += (targetPitch * Math.PI / 180 - board.rotation.x) * alpha;
+  board.rotation.z += (-targetRoll  * Math.PI / 180 - board.rotation.z) * alpha;
+  board.rotation.y += (targetYaw   * Math.PI / 180 - board.rotation.y) * alpha;
+  renderer.render(scene, camera);
+}
+animate();
+
+// ===== 图表 =====
+const mkChart = (id, datasets) => new Chart(document.getElementById(id), {
+  type: 'line',
+  data: { labels: [], datasets },
+  options: { animation: false, plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12 } } },
+    scales: { x: { display: false }, y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } } } }
+});
+
+const chartAngles = mkChart('chart-angles', [
+  { label: 'Roll',  data: [], borderColor: '#f87171', tension: 0.4, pointRadius: 0 },
+  { label: 'Pitch', data: [], borderColor: '#34d399', tension: 0.4, pointRadius: 0 },
+]);
+const chartAccel = mkChart('chart-accel', [
+  { label: '合加速度', data: [], borderColor: '#fbbf24', fill: true,
+    backgroundColor: '#fbbf2422', tension: 0.4, pointRadius: 0 },
+]);
+
+// ===== 数据刷新 =====
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+
+    targetRoll  = s.roll  || 0;
+    targetPitch = s.pitch || 0;
+    targetYaw   = s.yaw   || 0;
+
+    document.getElementById('val-roll').textContent  = (s.roll  || 0).toFixed(1) + '°';
+    document.getElementById('val-pitch').textContent = (s.pitch || 0).toFixed(1) + '°';
+    document.getElementById('val-yaw').textContent   = (s.yaw   || 0).toFixed(1) + '°';
+    document.getElementById('val-ax').textContent = (s.ax || 0).toFixed(2);
+    document.getElementById('val-ay').textContent = (s.ay || 0).toFixed(2);
+    document.getElementById('val-az').textContent = (s.az || 0).toFixed(2);
+    document.getElementById('val-gx').textContent = (s.gx || 0).toFixed(3);
+    document.getElementById('val-gy').textContent = (s.gy || 0).toFixed(3);
+    document.getElementById('val-gz').textContent = (s.gz || 0).toFixed(3);
+  } catch(e) {}
+}
+
+async function refreshHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const h = await r.json();
+    const labels = h.timestamps.map((_, i) => i);
+    chartAngles.data.labels = labels;
+    chartAngles.data.datasets[0].data = h.roll;
+    chartAngles.data.datasets[1].data = h.pitch;
+    chartAngles.update('none');
+    chartAccel.data.labels = labels;
+    chartAccel.data.datasets[0].data = h.accel_mag;
+    chartAccel.update('none');
+  } catch(e) {}
+}
+
+async function refreshMotion() {
+  try {
+    const r = await fetch('/api/motion', { cache: 'no-store' });
+    const d = await r.json();
+    const el = document.getElementById('motion-list');
+    if (!d.events || d.events.length === 0) {
+      el.innerHTML = '<span style="color:#475569">等待运动...</span>';
+    } else {
+      el.innerHTML = [...d.events].reverse().map(e =>
+        `<div class="motion-item">[${e.time}] 强度:${e.magnitude} R:${e.roll}° P:${e.pitch}°</div>`
+      ).join('');
+    }
+  } catch(e) {}
+}
+
+refreshState(); refreshHistory(); refreshMotion();
+setInterval(refreshState,   100);
+setInterval(refreshHistory, 500);
+setInterval(refreshMotion,  2000);
+</script>
+</body>
+</html>

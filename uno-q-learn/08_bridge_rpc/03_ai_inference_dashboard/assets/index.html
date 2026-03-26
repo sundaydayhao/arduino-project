@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arduino UNO Q - AI 推理仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, Arial, sans-serif; background: #0f172a; color: #e2e8f0; padding: 16px; }
+  h1 { color: #f59e0b; margin-bottom: 4px; font-size: 1.4em; }
+  .subtitle { color: #64748b; font-size: 0.85em; margin-bottom: 16px; }
+  .top-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .panel { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
+  .panel h3 { color: #94a3b8; font-size: 0.85em; margin-bottom: 12px; }
+  .gesture-display { text-align: center; padding: 20px 0; }
+  .gesture-icon { font-size: 4em; margin-bottom: 8px; }
+  .gesture-name { font-size: 2em; font-weight: 700; color: #f59e0b; }
+  .gesture-conf { font-size: 1em; color: #64748b; margin-top: 4px; }
+  .conf-bar { height: 8px; background: #334155; border-radius: 4px; margin-top: 8px; overflow: hidden; }
+  .conf-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #ef4444); border-radius: 4px; transition: width 0.3s; }
+  .scores-grid { display: grid; grid-template-columns: 1fr; gap: 6px; }
+  .score-row { display: flex; align-items: center; gap: 8px; }
+  .score-label { width: 90px; font-size: 0.8em; color: #94a3b8; text-align: right; flex-shrink: 0; }
+  .score-bar-bg { flex: 1; height: 16px; background: #0f172a; border-radius: 4px; overflow: hidden; }
+  .score-bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .score-val { width: 40px; font-size: 0.75em; color: #64748b; text-align: right; }
+  .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat-item { background: #0f172a; border-radius: 8px; padding: 10px; text-align: center; }
+  .stat-item .label { color: #64748b; font-size: 0.7em; }
+  .stat-item .value { font-size: 1.4em; font-weight: 700; color: #38bdf8; }
+  .recent-list { max-height: 160px; overflow-y: auto; }
+  .recent-item { padding: 5px 8px; border-radius: 4px; margin-bottom: 3px; background: #0f172a; font-size: 0.82em; }
+  .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>🤖 Arduino UNO Q — AI 推理仪表盘</h1>
+<p class="subtitle">TFLite MCU 推理 → Bridge → Linux MPU → REST API → 实时可视化</p>
+
+<div class="top-row">
+  <!-- 当前手势 -->
+  <div class="panel">
+    <h3>🎯 当前识别结果</h3>
+    <div class="gesture-display">
+      <div class="gesture-icon" id="gesture-icon">💤</div>
+      <div class="gesture-name" id="gesture-name">idle</div>
+      <div class="gesture-conf" id="gesture-conf">置信度: 0%</div>
+      <div class="conf-bar"><div class="conf-fill" id="conf-fill" style="width:0%"></div></div>
+    </div>
+    <div class="stats-grid" style="margin-top:12px">
+      <div class="stat-item"><div class="label">推理延迟</div><div class="value" id="stat-ms">--</div></div>
+      <div class="stat-item"><div class="label">总推理次数</div><div class="value" id="stat-total">--</div></div>
+      <div class="stat-item"><div class="label">平均延迟</div><div class="value" id="stat-avg">--</div></div>
+    </div>
+  </div>
+
+  <!-- 各类别置信度 -->
+  <div class="panel">
+    <h3>📊 各类别置信度</h3>
+    <div class="scores-grid" id="scores-grid"></div>
+  </div>
+</div>
+
+<div class="top-row">
+  <!-- 手势统计 -->
+  <div class="panel">
+    <h3>📈 手势分布统计</h3>
+    <canvas id="chart-pie" height="180"></canvas>
+  </div>
+
+  <!-- 最近检测 -->
+  <div class="panel">
+    <h3>⚡ 最近检测到的手势</h3>
+    <div class="recent-list" id="recent-list">
+      <span style="color:#475569">等待手势...</span>
+    </div>
+  </div>
+</div>
+
+<div class="charts-row">
+  <div class="panel">
+    <h3>📈 置信度历史</h3>
+    <canvas id="chart-conf" height="100"></canvas>
+  </div>
+  <div class="panel">
+    <h3>⏱️ 推理延迟历史 (ms)</h3>
+    <canvas id="chart-latency" height="100"></canvas>
+  </div>
+</div>
+
+<script>
+const GESTURE_ICONS = {
+  idle: "💤", swipe_up: "⬆️", swipe_down: "⬇️",
+  swipe_left: "⬅️", swipe_right: "➡️", circle: "🔄", shake: "📳"
+};
+const COLORS = ["#64748b","#38bdf8","#34d399","#f59e0b","#f87171","#a78bfa","#fb923c"];
+
+// 初始化置信度条
+const GESTURES = ["idle","swipe_up","swipe_down","swipe_left","swipe_right","circle","shake"];
+const scoresGrid = document.getElementById('scores-grid');
+GESTURES.forEach((g, i) => {
+  scoresGrid.innerHTML += `
+    <div class="score-row">
+      <div class="score-label">${g}</div>
+      <div class="score-bar-bg"><div class="score-bar-fill" id="bar-${g}"
+        style="width:0%;background:${COLORS[i]}"></div></div>
+      <div class="score-val" id="sv-${g}">0%</div>
+    </div>`;
+});
+
+// 饼图
+const pieChart = new Chart(document.getElementById('chart-pie'), {
+  type: 'doughnut',
+  data: {
+    labels: GESTURES,
+    datasets: [{ data: new Array(7).fill(0), backgroundColor: COLORS, borderWidth: 0 }]
+  },
+  options: { animation: false, plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } } } } }
+});
+
+// 折线图
+const mkLine = (id, label, color) => new Chart(document.getElementById(id), {
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], borderColor: color,
+    backgroundColor: color + '22', fill: true, tension: 0.4, pointRadius: 0 }] },
+  options: { animation: false, plugins: { legend: { display: false } },
+    scales: { x: { display: false }, y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } } } }
+});
+const chartConf    = mkLine('chart-conf',    '置信度', '#f59e0b');
+const chartLatency = mkLine('chart-latency', '延迟ms', '#38bdf8');
+
+// 刷新状态
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+
+    const icon = GESTURE_ICONS[s.gesture] || '❓';
+    document.getElementById('gesture-icon').textContent = icon;
+    document.getElementById('gesture-name').textContent = s.gesture || 'idle';
+    const pct = Math.round((s.confidence || 0) * 100);
+    document.getElementById('gesture-conf').textContent = `置信度: ${pct}%`;
+    document.getElementById('conf-fill').style.width = pct + '%';
+    document.getElementById('stat-ms').textContent    = (s.inference_ms || 0) + 'ms';
+    document.getElementById('stat-total').textContent = s.total_count || 0;
+    document.getElementById('stat-avg').textContent   = (s.avg_ms || 0).toFixed(1) + 'ms';
+
+    // 更新置信度条
+    (s.scores || []).forEach((sc, i) => {
+      const g = GESTURES[i];
+      const p = Math.round(sc * 100);
+      const bar = document.getElementById('bar-' + g);
+      const sv  = document.getElementById('sv-' + g);
+      if (bar) bar.style.width = p + '%';
+      if (sv)  sv.textContent  = p + '%';
+    });
+  } catch(e) {}
+}
+
+async function refreshHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const h = await r.json();
+    const labels = h.confidence.map((_, i) => i);
+    chartConf.data.labels = labels;
+    chartConf.data.datasets[0].data = h.confidence;
+    chartConf.update('none');
+    chartLatency.data.labels = labels;
+    chartLatency.data.datasets[0].data = h.latency;
+    chartLatency.update('none');
+  } catch(e) {}
+}
+
+async function refreshStats() {
+  try {
+    const r = await fetch('/api/stats', { cache: 'no-store' });
+    const d = await r.json();
+    pieChart.data.datasets[0].data = GESTURES.map(g => d.counts[g] || 0);
+    pieChart.update('none');
+    const el = document.getElementById('recent-list');
+    if (!d.recent || d.recent.length === 0) {
+      el.innerHTML = '<span style="color:#475569">等待手势...</span>';
+    } else {
+      el.innerHTML = [...d.recent].reverse().map(e =>
+        `<div class="recent-item" style="border-left:3px solid #f59e0b;padding-left:8px">
+          [${e.time}] ${GESTURE_ICONS[e.gesture]||''} ${e.gesture} — ${e.confidence}%
+        </div>`
+      ).join('');
+    }
+  } catch(e) {}
+}
+
+refreshState(); refreshHistory(); refreshStats();
+setInterval(refreshState,   200);
+setInterval(refreshHistory, 1000);
+setInterval(refreshStats,   2000);
+</script>
+</body>
+</html>

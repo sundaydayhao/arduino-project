@@ -1,0 +1,6 @@
+name: industrial-monitor
+description: "工业多路传感器监控 - 电流/振动/温度/压力/转速 + FFT 分析"
+ports: []
+bricks:
+- arduino:web_ui: {}
+icon: 🏭

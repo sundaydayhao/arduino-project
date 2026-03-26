@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arduino UNO Q - 工业监控</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, Arial, sans-serif; background: #0f172a; color: #e2e8f0; padding: 16px; }
+  h1 { color: #ef4444; margin-bottom: 4px; font-size: 1.4em; }
+  .subtitle { color: #64748b; font-size: 0.85em; margin-bottom: 16px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kpi { background: #1e293b; border-radius: 10px; padding: 14px; text-align: center; border: 1px solid #334155; }
+  .kpi .label { color: #64748b; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; }
+  .kpi .value { font-size: 1.7em; font-weight: 700; margin: 4px 0; color: #e2e8f0; }
+  .kpi .unit  { color: #475569; font-size: 0.75em; }
+  .kpi.ok .value    { color: #22c55e; }
+  .kpi.warn .value  { color: #f59e0b; }
+  .kpi.danger .value{ color: #ef4444; }
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .panel { background: #1e293b; border-radius: 10px; padding: 14px; border: 1px solid #334155; }
+  .panel h3 { color: #94a3b8; font-size: 0.82em; margin-bottom: 10px; }
+  .dio-row { display: flex; gap: 10px; margin-top: 8px; }
+  .dio-led { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #334155; display: flex; align-items: center; justify-content: center; font-size: 0.65em; color: #64748b; }
+  .dio-led.on { background: #22c55e; border-color: #22c55e; color: #fff; }
+  .alert-list { max-height: 140px; overflow-y: auto; }
+  .alert-item { padding: 5px 8px; border-radius: 4px; margin-bottom: 3px; font-size: 0.82em; }
+  .alert-item.warning { background: #451a03; color: #fbbf24; }
+  .alert-item.danger  { background: #450a0a; color: #f87171; }
+  @media (max-width: 600px) { .charts-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>🏭 Arduino UNO Q — 工业监控系统</h1>
+<p class="subtitle">MCU 多路采集 → Bridge → Linux MPU (FFT/统计) → REST API → Web</p>
+
+<div class="kpi-grid">
+  <div class="kpi" id="kpi-current"><div class="label">电流</div><div class="value" id="v-current">--</div><div class="unit">A</div></div>
+  <div class="kpi" id="kpi-power">  <div class="label">功率</div><div class="value" id="v-power">--</div><div class="unit">W</div></div>
+  <div class="kpi" id="kpi-vib">    <div class="label">振动</div><div class="value" id="v-vib">--</div><div class="unit">g</div></div>
+  <div class="kpi" id="kpi-temp">   <div class="label">温度</div><div class="value" id="v-temp">--</div><div class="unit">°C</div></div>
+  <div class="kpi" id="kpi-pres">   <div class="label">压力</div><div class="value" id="v-pres">--</div><div class="unit">bar</div></div>
+  <div class="kpi" id="kpi-rpm">    <div class="label">转速</div><div class="value" id="v-rpm">--</div><div class="unit">RPM</div></div>
+</div>
+
+<div class="charts-grid">
+  <div class="panel">
+    <h3>⚡ 电流历史 (A)</h3>
+    <canvas id="c-current" height="100"></canvas>
+  </div>
+  <div class="panel">
+    <h3>📳 振动历史 (g)</h3>
+    <canvas id="c-vib" height="100"></canvas>
+  </div>
+  <div class="panel">
+    <h3>🌡️ 温度历史 (°C)</h3>
+    <canvas id="c-temp" height="100"></canvas>
+  </div>
+  <div class="panel">
+    <h3>🔄 转速历史 (RPM)</h3>
+    <canvas id="c-rpm" height="100"></canvas>
+  </div>
+</div>
+
+<div class="charts-grid">
+  <div class="panel">
+    <h3>📊 振动 FFT 频谱 (Linux MPU 计算)</h3>
+    <canvas id="c-fft" height="120"></canvas>
+  </div>
+  <div class="panel">
+    <h3>🔌 数字量 I/O 状态</h3>
+    <div class="dio-row" id="dio-row">
+      <div class="dio-led" id="dio-0">D4</div>
+      <div class="dio-led" id="dio-1">D5</div>
+      <div class="dio-led" id="dio-2">D6</div>
+    </div>
+    <div style="margin-top:14px">
+      <h3>⚠️ 告警</h3>
+      <div class="alert-list" id="alert-list"><span style="color:#475569">暂无告警</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const mkLine = (id, label, color) => new Chart(document.getElementById(id), {
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], borderColor: color,
+    backgroundColor: color+'22', fill: true, tension: 0.4, pointRadius: 0 }] },
+  options: { animation: false, plugins: { legend: { display: false } },
+    scales: { x: { display: false }, y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } } } }
+});
+
+const charts = {
+  current: mkLine('c-current', '电流', '#38bdf8'),
+  vib:     mkLine('c-vib',     '振动', '#f87171'),
+  temp:    mkLine('c-temp',    '温度', '#fbbf24'),
+  rpm:     mkLine('c-rpm',     '转速', '#a78bfa'),
+};
+
+const fftChart = new Chart(document.getElementById('c-fft'), {
+  type: 'bar',
+  data: { labels: [], datasets: [{ label: 'FFT', data: [],
+    backgroundColor: '#38bdf855', borderColor: '#38bdf8', borderWidth: 1 }] },
+  options: { animation: false, plugins: { legend: { display: false } },
+    scales: { x: { ticks: { color: '#64748b', maxTicksLimit: 8 } },
+              y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } } } }
+});
+
+function setKpi(id, valId, value, decimals, warnVal, dangerVal) {
+  const el = document.getElementById(valId);
+  if (el) el.textContent = value == null ? '--' : Number(value).toFixed(decimals);
+  const kpi = document.getElementById('kpi-' + id);
+  if (kpi && value != null) {
+    kpi.className = 'kpi ' + (value >= dangerVal ? 'danger' : value >= warnVal ? 'warn' : 'ok');
+  }
+}
+
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+    setKpi('current', 'v-current', s.current,     2, 20,   25);
+    setKpi('power',   'v-power',   s.power,        0, 4000, 5000);
+    setKpi('vib',     'v-vib',     s.vibration,    3, 1.5,  2.0);
+    setKpi('temp',    'v-temp',    s.temperature,  1, 60,   80);
+    setKpi('pres',    'v-pres',    s.pressure,     2, 6,    8);
+    setKpi('rpm',     'v-rpm',     s.rpm,          0, 2500, 3000);
+    (s.dio_bits || []).forEach((bit, i) => {
+      const el = document.getElementById('dio-' + i);
+      if (el) el.className = 'dio-led' + (bit ? ' on' : '');
+    });
+  } catch(e) {}
+}
+
+async function refreshHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const h = await r.json();
+    const labels = (h.timestamps || []).map((_, i) => i);
+    [['current','current'],['vibration','vib'],['temperature','temp'],['rpm','rpm']].forEach(([hk, ck]) => {
+      charts[ck].data.labels = labels;
+      charts[ck].data.datasets[0].data = h[hk] || [];
+      charts[ck].update('none');
+    });
+  } catch(e) {}
+}
+
+async function refreshFFT() {
+  try {
+    const r = await fetch('/api/fft', { cache: 'no-store' });
+    const d = await r.json();
+    fftChart.data.labels = (d.freqs || []).map(f => f.toFixed(3));
+    fftChart.data.datasets[0].data = d.magnitudes || [];
+    fftChart.update('none');
+  } catch(e) {}
+}
+
+async function refreshAlerts() {
+  try {
+    const r = await fetch('/api/alerts', { cache: 'no-store' });
+    const d = await r.json();
+    const el = document.getElementById('alert-list');
+    if (!d.alerts || d.alerts.length === 0) {
+      el.innerHTML = '<span style="color:#475569">暂无告警</span>';
+    } else {
+      el.innerHTML = d.alerts.map(a =>
+        `<div class="alert-item ${a.level}">[${a.time}] ${a.msg}</div>`
+      ).join('');
+    }
+  } catch(e) {}
+}
+
+refreshState(); refreshHistory(); refreshFFT(); refreshAlerts();
+setInterval(refreshState,   500);
+setInterval(refreshHistory, 2000);
+setInterval(refreshFFT,     3000);
+setInterval(refreshAlerts,  2000);
+</script>
+</body>
+</html>
