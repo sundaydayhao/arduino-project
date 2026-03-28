@@ -4,20 +4,11 @@
  * ============================================================
  *
  * Supported boards:
- *   - Arduino UNO R3
- *   - Arduino Mega 2560
  *   - Lion D1 R1 / LOLIN(WeMos) D1 R1
+ *   - Other Arduino-compatible boards using numeric D-pin definitions
  *
  * LCD1602 parallel wiring used in this sketch:
- *   Arduino UNO R3:
- *   - RS -> D8
- *   - EN -> D9
- *   - D4 -> D4
- *   - D5 -> D5
- *   - D6 -> D6
- *   - D7 -> D7
- *
- *   Arduino Mega 2560:
+ *   Numeric-pin boards:
  *   - RS -> D8
  *   - EN -> D9
  *   - D4 -> D4
@@ -61,24 +52,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(ARDUINO_AVR_UNO)
-#define BOARD_NAME "Arduino UNO R3"
-#define LCD_RS 8
-#define LCD_EN 9
-#define LCD_D4 4
-#define LCD_D5 5
-#define LCD_D6 6
-#define LCD_D7 7
-#elif defined(ARDUINO_AVR_MEGA2560)
-#define BOARD_NAME "Arduino Mega 2560"
-#define LCD_RS 8
-#define LCD_EN 9
-#define LCD_D4 4
-#define LCD_D5 5
-#define LCD_D6 6
-#define LCD_D7 7
-#elif defined(ARDUINO_ESP8266_WEMOS_D1R1)
-#define BOARD_NAME "Lion D1 R1 / LOLIN(WeMos) D1 R1"
+#if __has_include(<Arduino_RouterBridge.h>)
+#include <Arduino_RouterBridge.h>
+#define USE_MONITOR_CONSOLE 1
+#else
+#define USE_MONITOR_CONSOLE 0
+#endif
+
+#if defined(ARDUINO_ESP8266_WEMOS_D1R1)
 #define LCD_RS D8
 #define LCD_EN D9
 #define LCD_D4 D4
@@ -86,7 +67,12 @@
 #define LCD_D6 D6
 #define LCD_D7 D7
 #else
-#error "Unsupported board. Select Arduino UNO R3, Arduino Mega 2560, or LOLIN(WeMos) D1 R1 / Lion D1 R1."
+#define LCD_RS 8
+#define LCD_EN 9
+#define LCD_D4 4
+#define LCD_D5 5
+#define LCD_D6 6
+#define LCD_D7 7
 #endif
 
 #define LCD_COLS 16
@@ -109,6 +95,98 @@ const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 ClockDateTime currentTime;
 unsigned long lastTickMillis = 0;
 bool needsDisplayRefresh = true;
+
+void beginDebugPort() {
+#if USE_MONITOR_CONSOLE
+  Monitor.begin();
+  delay(1000);
+#else
+  Serial.begin(SERIAL_BAUD);
+#endif
+}
+
+void debugPrint(const __FlashStringHelper* text) {
+#if USE_MONITOR_CONSOLE
+  Monitor.print(text);
+#else
+  Serial.print(text);
+#endif
+}
+
+void debugPrint(const char* text) {
+#if USE_MONITOR_CONSOLE
+  Monitor.print(text);
+#else
+  Serial.print(text);
+#endif
+}
+
+void debugPrint(char ch) {
+#if USE_MONITOR_CONSOLE
+  Monitor.print(ch);
+#else
+  Serial.print(ch);
+#endif
+}
+
+void debugPrint(int value) {
+#if USE_MONITOR_CONSOLE
+  Monitor.print(value);
+#else
+  Serial.print(value);
+#endif
+}
+
+void debugPrintln(const __FlashStringHelper* text) {
+#if USE_MONITOR_CONSOLE
+  Monitor.println(text);
+#else
+  Serial.println(text);
+#endif
+  debugFlush();
+}
+
+void debugPrintln(const char* text) {
+#if USE_MONITOR_CONSOLE
+  Monitor.println(text);
+#else
+  Serial.println(text);
+#endif
+  debugFlush();
+}
+
+void debugPrintln() {
+#if USE_MONITOR_CONSOLE
+  Monitor.println();
+#else
+  Serial.println();
+#endif
+  debugFlush();
+}
+
+void debugFlush() {
+#if USE_MONITOR_CONSOLE
+  Monitor.flush();
+#else
+  Serial.flush();
+#endif
+}
+
+int debugAvailable() {
+#if USE_MONITOR_CONSOLE
+  return Monitor.available();
+#else
+  return Serial.available();
+#endif
+}
+
+String debugReadStringUntil(char terminator) {
+#if USE_MONITOR_CONSOLE
+  return Monitor.readStringUntil(terminator);
+#else
+  return Serial.readStringUntil(terminator);
+#endif
+}
 
 bool isLeapYear(int year) {
   if (year % 400 == 0) {
@@ -277,10 +355,10 @@ void displayClock() {
   lcd.setCursor(0, 1);
   printPaddedLine(line2);
 
-  Serial.print(F("[TIME] "));
-  Serial.print(line1);
-  Serial.print(F("  "));
-  Serial.println(line2);
+  debugPrint(F("[TIME] "));
+  debugPrint(line1);
+  debugPrint(F("  "));
+  debugPrintln(line2);
 
   needsDisplayRefresh = false;
 }
@@ -311,15 +389,15 @@ void printCurrentTimeToSerial() {
     dayNames[dayOfWeek(currentTime.year, currentTime.month, currentTime.day)]
   );
 
-  Serial.println(buf);
+  debugPrintln(buf);
 }
 
 void handleSerial() {
-  if (!Serial.available()) {
+  if (!debugAvailable()) {
     return;
   }
 
-  String cmd = Serial.readStringUntil('\n');
+  String cmd = debugReadStringUntil('\n');
   cmd.trim();
 
   if (cmd.length() == 0) {
@@ -333,7 +411,7 @@ void handleSerial() {
 
   if (cmd.charAt(0) == 'T' || cmd.charAt(0) == 't') {
     if (cmd.length() < 20) {
-      Serial.println(F("[ERROR] Format: T2024-03-25 12:30:00"));
+      debugPrintln(F("[ERROR] Format: T2024-03-25 12:30:00"));
       return;
     }
 
@@ -346,7 +424,7 @@ void handleSerial() {
     newTime.second = cmd.substring(18, 20).toInt();
 
     if (!isValidDateTime(newTime)) {
-      Serial.println(F("[ERROR] Invalid date/time values."));
+      debugPrintln(F("[ERROR] Invalid date/time values."));
       return;
     }
 
@@ -354,26 +432,22 @@ void handleSerial() {
     lastTickMillis = millis();
     needsDisplayRefresh = true;
 
-    Serial.print(F("[OK] Time set to: "));
+    debugPrint(F("[OK] Time set to: "));
     printCurrentTimeToSerial();
     showTimeUpdatedMessage();
     return;
   }
 
-  Serial.println(F("[HELP] Commands:"));
-  Serial.println(F("  R                     - Read current time"));
-  Serial.println(F("  T2024-03-25 12:30:00  - Set time"));
+  debugPrintln(F("[HELP] Commands:"));
+  debugPrintln(F("  R                     - Read current time"));
+  debugPrintln(F("  T2024-03-25 12:30:00  - Set time"));
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
-  Serial.println(F("============================="));
-  Serial.print(F("  "));
-  Serial.print(F(BOARD_NAME));
-  Serial.println(F(" Clock"));
-  Serial.println(F("============================="));
-  Serial.print(F("[BOARD] "));
-  Serial.println(F(BOARD_NAME));
+  beginDebugPort();
+  debugPrintln(F("============================="));
+  debugPrintln(F("      Arduino Clock"));
+  debugPrintln(F("============================="));
 
   lcd.begin(LCD_COLS, LCD_ROWS);
   lcd.clear();
@@ -388,11 +462,11 @@ void setup() {
   lastTickMillis = millis();
   needsDisplayRefresh = true;
 
-  Serial.println(F("[OK] Software clock initialized."));
-  Serial.println(F("[TIP] No RTC hardware is used in this version."));
-  Serial.println(F("[TIP] Time starts from compile time after reset."));
-  Serial.println(F("[TIP] Send 'T2024-03-25 12:30:00' to set time."));
-  Serial.println(F("[TIP] Send 'R' to read current time."));
+  debugPrintln(F("[OK] Software clock initialized."));
+  debugPrintln(F("[TIP] No RTC hardware is used in this version."));
+  debugPrintln(F("[TIP] Time starts from compile time after reset."));
+  debugPrintln(F("[TIP] Send 'T2024-03-25 12:30:00' to set time."));
+  debugPrintln(F("[TIP] Send 'R' to read current time."));
 }
 
 void loop() {
