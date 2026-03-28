@@ -5,10 +5,19 @@
  *
  * Supported boards:
  *   - Arduino UNO R3
+ *   - Arduino Mega 2560
  *   - Lion D1 R1 / LOLIN(WeMos) D1 R1
  *
  * LCD1602 parallel wiring used in this sketch:
  *   Arduino UNO R3:
+ *   - RS -> D8
+ *   - EN -> D9
+ *   - D4 -> D4
+ *   - D5 -> D5
+ *   - D6 -> D6
+ *   - D7 -> D7
+ *
+ *   Arduino Mega 2560:
  *   - RS -> D8
  *   - EN -> D9
  *   - D4 -> D4
@@ -60,6 +69,14 @@
 #define LCD_D5 5
 #define LCD_D6 6
 #define LCD_D7 7
+#elif defined(ARDUINO_AVR_MEGA2560)
+#define BOARD_NAME "Arduino Mega 2560"
+#define LCD_RS 8
+#define LCD_EN 9
+#define LCD_D4 4
+#define LCD_D5 5
+#define LCD_D6 6
+#define LCD_D7 7
 #elif defined(ARDUINO_ESP8266_WEMOS_D1R1)
 #define BOARD_NAME "Lion D1 R1 / LOLIN(WeMos) D1 R1"
 #define LCD_RS D8
@@ -69,7 +86,7 @@
 #define LCD_D6 D6
 #define LCD_D7 D7
 #else
-#error "Unsupported board. Select Arduino UNO R3 or LOLIN(WeMos) D1 R1 / Lion D1 R1."
+#error "Unsupported board. Select Arduino UNO R3, Arduino Mega 2560, or LOLIN(WeMos) D1 R1 / Lion D1 R1."
 #endif
 
 #define LCD_COLS 16
