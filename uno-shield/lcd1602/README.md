@@ -1,187 +1,126 @@
-# Arduino R3 时钟项目
+# Arduino UNO + LCD1602 时钟
 
-基于 Arduino UNO R3 的数字时钟，使用 DS3231 RTC 模块实现高精度自动对时，LCD1602 I2C 显示屏显示时间、日期和温度。
+这个项目当前不使用 RTC 硬件。
 
----
+LCD1602 与 Arduino 之间使用并行接口，时间由程序内部的软件时钟维护。  
+软件时钟基于 `millis()` 运行，Arduino 复位或断电后时间不会保留。
 
-## 📁 项目结构
+## 项目结构
 
-```
-arduino-clock/
-├── src/
-│   └── arduino_clock.ino          # Arduino 主程序
-├── schematic/
-│   └── arduino_clock_schematic.json  # 嘉立创EDA 原理图（可直接导入）
-└── README.md                      # 本文档
-```
-
----
-
-## 🔧 硬件清单
-
-| 序号 | 元件 | 规格 | 数量 |
-|------|------|------|------|
-| 1 | Arduino UNO R3 | ATmega328P | 1 |
-| 2 | DS3231 RTC 模块 | 含CR2032电池座 | 1 |
-| 3 | LCD1602 I2C 模块 | 带PCF8574转接板 | 1 |
-| 4 | 杜邦线 | 母对母 | 若干 |
-| 5 | CR2032 纽扣电池 | 3V | 1 |
-
----
-
-## 🔌 接线说明
-
-所有模块均通过 **I2C 总线** 连接，只需 4 根线：
-
-### Arduino UNO R3 引脚连接
-
-| Arduino 引脚 | 连接目标 | 说明 |
-|-------------|---------|------|
-| **5V** | DS3231 VCC、LCD VCC | 5V 电源 |
-| **GND** | DS3231 GND、LCD GND | 公共地 |
-| **A4 (SDA)** | DS3231 SDA、LCD SDA | I2C 数据线 |
-| **A5 (SCL)** | DS3231 SCL、LCD SCL | I2C 时钟线 |
-
-### I2C 设备地址
-
-| 设备 | I2C 地址 | 说明 |
-|------|---------|------|
-| DS3231 RTC | `0x68` | 固定地址，不可更改 |
-| LCD1602 PCF8574 | `0x27` | 默认地址（部分模块为 `0x3F`） |
-
-> ⚠️ **注意**：DS3231 和 LCD1602 共享同一 I2C 总线，地址不同，可以同时工作。
-
----
-
-## 📺 LCD 显示格式
-
-```
-+----------------+
-| 2024-03-25 Mon |   ← 第1行：日期 + 星期
-| 12:34:56  25.5C|   ← 第2行：时间 + 温度
-+----------------+
+```text
+lcd1602/
+├─ src/
+│  ├─ arduino_clock/
+│  │  └─ arduino_clock.ino
+│  └─ lcd_test/
+│     └─ lcd_test.ino
+└─ README.md
 ```
 
-- **第1行**：`YYYY-MM-DD Day`（年-月-日 星期）
-- **第2行**：`HH:MM:SS TT.TC`（时:分:秒 温度°C）
-- 温度来自 DS3231 内置温度传感器（精度 ±3°C）
+## 硬件清单
 
----
-
-## 📚 所需 Arduino 库
-
-在 Arduino IDE 中安装以下库（工具 → 管理库）：
-
-### 1. RTClib（Adafruit）
-- 搜索：`RTClib`
-- 作者：Adafruit
-- 用途：DS3231 RTC 模块驱动
-
-### 2. LiquidCrystal I2C
-- 搜索：`LiquidCrystal I2C`
-- 作者：Frank de Brabander
-- 用途：LCD1602 I2C 显示驱动
-
----
-
-## 🚀 使用步骤
-
-### 1. 安装库
-打开 Arduino IDE → 工具 → 管理库，分别搜索并安装上述两个库。
-
-### 2. 上传代码
-1. 打开 `src/arduino_clock.ino`
-2. 选择开发板：工具 → 开发板 → Arduino UNO
-3. 选择端口：工具 → 端口 → 选择对应 COM 口
-4. 点击上传（→）
-
-### 3. 自动对时
-- 首次上传时，程序会自动将 RTC 时间设置为**编译时间**
-- 如果 DS3231 电池正常，断电后时间不会丢失
-- 如果 RTC 掉电（无电池），重新上传代码即可重新校时
-
-### 4. 手动设置时间（串口）
-打开串口监视器（波特率 9600），发送以下命令：
-
-```
-T2024-03-25 12:30:00    ← 设置时间（格式：TYYYY-MM-DD HH:MM:SS）
-R                        ← 读取当前时间
-```
-
----
-
-## 📐 导入嘉立创EDA原理图
-
-### 方法一：嘉立创EDA Standard（网页版）✅ 推荐
-1. 打开 [嘉立创EDA Standard](https://lceda.cn/)
-2. 点击菜单：**File → Open → JLCEDA...**
-3. 在弹出的文件选择框中，选择 `schematic/arduino_clock_schematic.json`
-4. 点击打开，原理图即可加载显示
-
-> 💡 如果菜单为中文：**文件 → 打开 → 嘉立创EDA...**
-
-### 方法二：嘉立创EDA Pro（桌面版）
-1. 打开嘉立创EDA Pro
-2. 点击菜单：**文件 → 导入 → EasyEDA(Standard)**
-3. 选择 `schematic/arduino_clock_schematic.json`
-4. 点击确认导入
-
----
-
-## 🔍 常见问题
-
-### LCD 不显示或显示乱码
-- 检查 I2C 地址：部分 LCD 模块地址为 `0x3F`，修改代码中的 `LCD_I2C_ADDR`
-- 调节 LCD 背面的蓝色电位器（对比度调节）
-- 确认接线正确（SDA→A4，SCL→A5）
-
-### 时间不准确
-- DS3231 精度极高（±2ppm），通常不会不准
-- 如果时间错误，通过串口发送 `T` 命令手动校时
-- 检查 CR2032 电池是否安装
-
-### RTC 初始化失败
-- 检查 DS3231 模块接线
-- 确认 SDA 接 A4，SCL 接 A5
-- 检查 5V 供电是否正常
-
-### 串口无输出
-- 确认波特率设置为 9600
-- 重新上传代码后打开串口监视器
-
----
-
-## 📊 电路原理图说明
-
-原理图文件 `arduino_clock_schematic.json` 包含：
-
-- **U1** - Arduino UNO R3（主控制器）
-- **U2** - DS3231 RTC 模块（实时时钟，I2C地址 0x68）
-- **LCD1** - LCD1602 I2C 模块（显示屏，PCF8574 I2C地址 0x27）
-
-所有模块通过 I2C 总线（SDA/SCL）连接，使用 5V 单电源供电。
-
----
-
-## 📝 代码功能说明
-
-| 功能 | 说明 |
+| 元件 | 说明 |
 |------|------|
-| 自动校时 | 首次上传或RTC掉电时，自动使用编译时间设置RTC |
-| 实时显示 | 每秒刷新LCD显示当前时间、日期、星期和温度 |
-| 温度显示 | 使用DS3231内置温度传感器，精度±3°C |
-| 串口校时 | 通过串口发送命令手动设置时间 |
-| 错误处理 | RTC未连接时LCD显示错误提示 |
+| Arduino UNO R3 | 主控 |
+| LCD1602 | 16x2 字符液晶，HD44780 兼容，并行接口 |
+| 10K 电位器 | LCD 对比度调节 |
+| 杜邦线 | 若干 |
 
----
+## 接线说明
 
-## 📌 版本信息
+本项目代码采用 4 位并行模式，当前引脚定义如下：
 
-- **版本**：v1.0
-- **日期**：2024
-- **平台**：Arduino UNO R3
-- **IDE**：Arduino IDE 1.8.x / 2.x
+| LCD1602 引脚 | 连接到 Arduino UNO | 说明 |
+|-------------|---------------------|------|
+| VSS | GND | 地 |
+| VDD | 5V | 电源 |
+| VO | 10K 电位器中间脚 | 对比度调节 |
+| RS | D8 | 寄存器选择 |
+| RW | GND | 固定写模式 |
+| E | D9 | 使能 |
+| D4 | D4 | 数据线 |
+| D5 | D5 | 数据线 |
+| D6 | D6 | 数据线 |
+| D7 | D7 | 数据线 |
+| A / LED+ | 5V | 背光正极 |
+| K / LED- | GND | 背光负极 |
 
----
+10K 电位器推荐接法：
 
-*本项目使用 I2C 总线连接所有外设，接线简单，只需 4 根杜邦线即可完成搭建。*
+| 电位器引脚 | 连接 |
+|-----------|------|
+| 一侧 | 5V |
+| 中间 | LCD `VO` |
+| 另一侧 | GND |
+
+如果你的 LCD 实际接线不同，直接修改 [`src/arduino_clock/arduino_clock.ino`](D:\workspace\arduino-project\uno-shield\lcd1602\src\arduino_clock\arduino_clock.ino#L42) 顶部这些宏：
+
+```cpp
+#define LCD_RS 8
+#define LCD_EN 9
+#define LCD_D4 4
+#define LCD_D5 5
+#define LCD_D6 6
+#define LCD_D7 7
+```
+
+## 依赖库
+
+需要 `LiquidCrystal`。这个库通常是 Arduino IDE 自带库，不需要额外安装。
+
+## 功能
+
+- LCD 第一行显示日期和星期，例如 `2026-03-28 Sat`
+- LCD 第二行显示时间和状态，例如 `21:30:45 No RTC`
+- 上电后默认从编译时间开始计时
+- 支持串口命令读取和设置软件时钟
+
+## 串口命令
+
+波特率：`9600`
+
+```text
+R
+```
+
+读取当前软件时钟时间。
+
+```text
+T2024-03-25 12:30:00
+```
+
+将软件时钟设置为指定时间。
+
+## 上传说明
+
+1. 用 Arduino IDE 打开 [`src/arduino_clock/arduino_clock.ino`](D:\workspace\arduino-project\uno-shield\lcd1602\src\arduino_clock\arduino_clock.ino)
+2. 开发板选择 `Arduino UNO`
+3. 选择正确的串口
+4. 编译并上传
+
+## LCD 自检
+
+如果串口有输出，但 LCD 只有背光没有字符，先上传 [`src/lcd_test/lcd_test.ino`](D:\workspace\arduino-project\uno-shield\lcd1602\src\lcd_test\lcd_test.ino)。
+
+这个草图只做一件事：反复在 LCD 上显示固定文本，不涉及时钟逻辑。如果这个测试也没有字符显示，问题基本就在接线或对比度，而不是主程序。
+
+## 限制
+
+- 这不是高精度时钟，时间精度取决于 Arduino 自身时基
+- 复位、断电、重新上电后，时间会回到重新编译时的时间，或者你串口手动设置的时间会丢失
+- 当前版本不显示 RTC 温度，因为没有 DS3231
+
+## 常见问题
+
+### LCD 不显示
+
+- 检查 `VSS/VDD` 和背光供电是否正确
+- 检查 `RW` 是否已经接地
+- 调整 10K 电位器，避免对比度过低
+- 确认 `RS/E/D4/D5/D6/D7` 与代码中的宏一致
+
+### 时间不准
+
+- 软件时钟本身不适合长期精确计时
+- 通过串口发送 `TYYYY-MM-DD HH:MM:SS` 重新设定时间
+- 如果后续需要掉电保持和更高精度，再接入 DS3231
