@@ -1,0 +1,181 @@
+(kicad_sch
+  (version 20231120)
+  (generator "codex")
+  (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a01")
+  (paper "A3")
+  (title_block
+    (title "Arduino Uno Traffic Light with 4x3621BH")
+    (date "2026-04-06")
+    (rev "A")
+    (company "Codex")
+    (comment 1 "Top sheet for hierarchical KiCad sketch")
+    (comment 2 "Uno + 4x74HC595 + 3xULN2803A + 8xBC327 + buzzer")
+  )
+  (lib_symbols)
+  (text "Hierarchical project skeleton for the Arduino Uno traffic light controller." (at 20 15 0)
+    (effects (font (size 2 2)))
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a02")
+  )
+  (text "Open each subsheet for the connection details, net names, and implementation notes." (at 20 20 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a03")
+  )
+  (sheet
+    (at 20 35)
+    (size 80 50)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (fields_autoplaced yes)
+    (stroke
+      (width 0.1524)
+      (type solid)
+    )
+    (fill
+      (color 0 0 0 0.0000)
+    )
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a10")
+    (property "Sheetname" "power_and_ctrl"
+      (at 20 34 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left bottom)
+      )
+    )
+    (property "Sheetfile" "power_and_ctrl.kicad_sch"
+      (at 20 86 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left top)
+      )
+    )
+    (instances
+      (project "traffic_light_uno_3621bh"
+        (path "/9fe8d50c-9d1a-4bd4-85d3-c3da0da11a10"
+          (page "2")
+        )
+      )
+    )
+  )
+  (sheet
+    (at 115 35)
+    (size 80 50)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (fields_autoplaced yes)
+    (stroke
+      (width 0.1524)
+      (type solid)
+    )
+    (fill
+      (color 0 0 0 0.0000)
+    )
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a11")
+    (property "Sheetname" "traffic_lamps_and_buzzer"
+      (at 115 34 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left bottom)
+      )
+    )
+    (property "Sheetfile" "traffic_lamps_and_buzzer.kicad_sch"
+      (at 115 86 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left top)
+      )
+    )
+    (instances
+      (project "traffic_light_uno_3621bh"
+        (path "/9fe8d50c-9d1a-4bd4-85d3-c3da0da11a11"
+          (page "3")
+        )
+      )
+    )
+  )
+  (sheet
+    (at 20 100)
+    (size 80 50)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (fields_autoplaced yes)
+    (stroke
+      (width 0.1524)
+      (type solid)
+    )
+    (fill
+      (color 0 0 0 0.0000)
+    )
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a12")
+    (property "Sheetname" "display_segments"
+      (at 20 99 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left bottom)
+      )
+    )
+    (property "Sheetfile" "display_segments.kicad_sch"
+      (at 20 151 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left top)
+      )
+    )
+    (instances
+      (project "traffic_light_uno_3621bh"
+        (path "/9fe8d50c-9d1a-4bd4-85d3-c3da0da11a12"
+          (page "4")
+        )
+      )
+    )
+  )
+  (sheet
+    (at 115 100)
+    (size 80 50)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (fields_autoplaced yes)
+    (stroke
+      (width 0.1524)
+      (type solid)
+    )
+    (fill
+      (color 0 0 0 0.0000)
+    )
+    (uuid "9fe8d50c-9d1a-4bd4-85d3-c3da0da11a13")
+    (property "Sheetname" "display_digits"
+      (at 115 99 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left bottom)
+      )
+    )
+    (property "Sheetfile" "display_digits.kicad_sch"
+      (at 115 151 0)
+      (effects
+        (font (size 1.27 1.27))
+        (justify left top)
+      )
+    )
+    (instances
+      (project "traffic_light_uno_3621bh"
+        (path "/9fe8d50c-9d1a-4bd4-85d3-c3da0da11a13"
+          (page "5")
+        )
+      )
+    )
+  )
+  (sheet_instances
+    (path "/"
+      (page "1")
+    )
+  )
+  (embedded_fonts no)
+)
