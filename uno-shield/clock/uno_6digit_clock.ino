@@ -8,6 +8,7 @@
 #define RTC_CE_PIN A3
 #define RTC_IO_PIN A4
 #define RTC_SCLK_PIN A5
+#define BUTTON_ADC_PIN A0
 
 // false: common cathode digits + NPN low-side digit transistors
 // true : common anode digits + PNP/P-MOS high-side digit transistors (18101BS default)
@@ -15,12 +16,18 @@ const bool COMMON_ANODE = true;
 
 // Segment order: a, b, c, d, e, f, g, dp
 const uint8_t segmentPins[8] = {2, 3, 4, 5, 6, 7, 8, 9};
-const uint8_t digitPins[DIGIT_COUNT] = {10, 11, 12, 13, A0, A1};
+// D1(TX) is reused as the 5th digit select so A0 can be reserved for the 4-key resistor ladder.
+const uint8_t digitPins[DIGIT_COUNT] = {10, 11, 12, 13, 1, A1};
 
 const unsigned long REFRESH_INTERVAL_US = 1000;
 const unsigned long PAGE_INTERVAL_MS = 3500;
 const unsigned long SENSOR_INTERVAL_MS = 2000;
 const unsigned long CONTENT_INTERVAL_MS = 100;
+const unsigned long BUTTON_DEBOUNCE_MS = 30;
+const unsigned long BUTTON_LONG_PRESS_MS = 800;
+const unsigned long BUTTON_REPEAT_START_MS = 500;
+const unsigned long BUTTON_REPEAT_INTERVAL_MS = 180;
+const unsigned long MANUAL_PAGE_HOLD_MS = 10000;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -40,6 +47,29 @@ enum Page : uint8_t {
   PAGE_TEMP = 2,
   PAGE_HUMI = 3,
   PAGE_COUNT = 4
+};
+
+enum ButtonId : uint8_t {
+  BUTTON_NONE = 0,
+  BUTTON_FUNCTION = 1,
+  BUTTON_SELECT = 2,
+  BUTTON_UP = 3,
+  BUTTON_DOWN = 4
+};
+
+enum UiMode : uint8_t {
+  UI_VIEW = 0,
+  UI_EDIT = 1
+};
+
+enum EditField : uint8_t {
+  EDIT_HOUR = 0,
+  EDIT_MINUTE = 1,
+  EDIT_SECOND = 2,
+  EDIT_YEAR = 3,
+  EDIT_MONTH = 4,
+  EDIT_DAY = 5,
+  EDIT_COUNT = 6
 };
 
 enum SegmentMask : uint8_t {
@@ -75,6 +105,22 @@ unsigned long lastContentMs = 0;
 
 float lastTemperature = NAN;
 float lastHumidity = NAN;
+
+UiMode uiMode = UI_VIEW;
+Page manualPage = PAGE_TIME;
+unsigned long manualPageUntilMs = 0;
+ClockTime editTime = {2026, 1, 1, 1, 0, 0, 0};
+EditField editField = EDIT_HOUR;
+
+ButtonId lastRawButton = BUTTON_NONE;
+ButtonId stableButton = BUTTON_NONE;
+ButtonId eventButton = BUTTON_NONE;
+bool eventIsLong = false;
+bool eventPending = false;
+bool pressConsumed = false;
+unsigned long lastButtonChangeMs = 0;
+unsigned long stablePressStartMs = 0;
+unsigned long lastRepeatMs = 0;
 
 const uint8_t DS1302_REG_WP = 0x8E;
 const uint8_t DS1302_CMD_CLOCK_BURST_READ = 0xBF;
@@ -272,6 +318,134 @@ void writeRtc(const ClockTime &time) {
   ds1302SetWriteProtect(true);
 }
 
+int wrapValue(int value, int minValue, int maxValue) {
+  int span = maxValue - minValue + 1;
+  while (value < minValue) {
+    value += span;
+  }
+  while (value > maxValue) {
+    value -= span;
+  }
+  return value;
+}
+
+void normalizeEditDate() {
+  if (editTime.month < 1) {
+    editTime.month = 1;
+  }
+  if (editTime.month > 12) {
+    editTime.month = 12;
+  }
+
+  uint8_t maxDay = daysInMonth(editTime.year, editTime.month);
+  if (editTime.day < 1) {
+    editTime.day = 1;
+  }
+  if (editTime.day > maxDay) {
+    editTime.day = maxDay;
+  }
+
+  editTime.dayOfWeek = calculateDayOfWeek(editTime.year, editTime.month, editTime.day);
+}
+
+Page getCurrentPage(unsigned long nowMs) {
+  if (uiMode == UI_EDIT) {
+    return editField <= EDIT_SECOND ? PAGE_TIME : PAGE_DATE;
+  }
+
+  if (manualPageUntilMs > nowMs) {
+    return manualPage;
+  }
+
+  return static_cast<Page>((nowMs / PAGE_INTERVAL_MS) % PAGE_COUNT);
+}
+
+void holdManualPage(Page page) {
+  manualPage = page;
+  manualPageUntilMs = millis() + MANUAL_PAGE_HOLD_MS;
+}
+
+void startEditMode(const ClockTime &currentTime) {
+  editTime = currentTime;
+  normalizeEditDate();
+  editField = EDIT_HOUR;
+  uiMode = UI_EDIT;
+}
+
+void saveEditTime() {
+  normalizeEditDate();
+  writeRtc(editTime);
+  uiMode = UI_VIEW;
+  holdManualPage(PAGE_TIME);
+}
+
+void cancelEditMode() {
+  uiMode = UI_VIEW;
+  holdManualPage(PAGE_TIME);
+}
+
+void advanceEditField() {
+  editField = static_cast<EditField>((editField + 1) % EDIT_COUNT);
+}
+
+void adjustEditField(int delta) {
+  switch (editField) {
+    case EDIT_HOUR:
+      editTime.hour = wrapValue(editTime.hour + delta, 0, 23);
+      break;
+    case EDIT_MINUTE:
+      editTime.minute = wrapValue(editTime.minute + delta, 0, 59);
+      break;
+    case EDIT_SECOND:
+      editTime.second = wrapValue(editTime.second + delta, 0, 59);
+      break;
+    case EDIT_YEAR:
+      editTime.year = wrapValue(editTime.year + delta, 2000, 2099);
+      normalizeEditDate();
+      break;
+    case EDIT_MONTH:
+      editTime.month = wrapValue(editTime.month + delta, 1, 12);
+      normalizeEditDate();
+      break;
+    case EDIT_DAY:
+      editTime.day = wrapValue(editTime.day + delta, 1, daysInMonth(editTime.year, editTime.month));
+      normalizeEditDate();
+      break;
+    default:
+      break;
+  }
+}
+
+ButtonId decodeButtonFromAdc(int adcValue) {
+  // Thresholds match a 10k pull-up on A0 and buttons to GND via 0R / 1k / 3.3k / 10k.
+  if (adcValue < 50) {
+    return BUTTON_FUNCTION;
+  }
+  if (adcValue < 170) {
+    return BUTTON_SELECT;
+  }
+  if (adcValue < 380) {
+    return BUTTON_UP;
+  }
+  if (adcValue < 700) {
+    return BUTTON_DOWN;
+  }
+  return BUTTON_NONE;
+}
+
+ButtonId readButtonRaw() {
+  return decodeButtonFromAdc(analogRead(BUTTON_ADC_PIN));
+}
+
+void queueButtonEvent(ButtonId button, bool isLong) {
+  if (eventPending) {
+    return;
+  }
+  eventButton = button;
+  eventIsLong = isLong;
+  eventPending = true;
+}
+
 uint8_t encodeChar(char ch) {
   if (ch >= '0' && ch <= '9') {
     return digitFont[ch - '0'];
@@ -373,6 +547,42 @@ void showDate(const ClockTime &now) {
   setGlyph(5, '0' + now.day % 10);
 }
 
+void blankDigits(uint8_t firstIndex, uint8_t count) {
+  for (uint8_t i = 0; i < count; ++i) {
+    if (firstIndex + i < DIGIT_COUNT) {
+      displayBuffer[firstIndex + i] = 0;
+    }
+  }
+}
+
+void showEditPage() {
+  bool blinkVisible = ((millis() / 300) % 2) == 0;
+
+  if (editField <= EDIT_SECOND) {
+    showTime(editTime);
+    if (!blinkVisible) {
+      if (editField == EDIT_HOUR) {
+        blankDigits(0, 2);
+      } else if (editField == EDIT_MINUTE) {
+        blankDigits(2, 2);
+      } else {
+        blankDigits(4, 2);
+      }
+    }
+  } else {
+    showDate(editTime);
+    if (!blinkVisible) {
+      if (editField == EDIT_YEAR) {
+        blankDigits(0, 2);
+      } else if (editField == EDIT_MONTH) {
+        blankDigits(2, 2);
+      } else {
+        blankDigits(4, 2);
+      }
+    }
+  }
+}
+
 void showFallbackPage(char prefix) {
   clearDisplayBuffer();
   setGlyph(0, prefix);
@@ -445,6 +655,121 @@ void updateSensors() {
   }
 }
 
+void updateButtons() {
+  unsigned long nowMs = millis();
+  ButtonId rawButton = readButtonRaw();
+
+  if (rawButton != lastRawButton) {
+    lastRawButton = rawButton;
+    lastButtonChangeMs = nowMs;
+  }
+
+  if (stableButton != lastRawButton && nowMs - lastButtonChangeMs >= BUTTON_DEBOUNCE_MS) {
+    ButtonId previousButton = stableButton;
+    stableButton = lastRawButton;
+
+    if (stableButton != BUTTON_NONE) {
+      stablePressStartMs = nowMs;
+      lastRepeatMs = nowMs;
+      pressConsumed = false;
+    } else if (previousButton != BUTTON_NONE && !pressConsumed) {
+      queueButtonEvent(previousButton, false);
+    }
+  }
+
+  if (stableButton == BUTTON_NONE) {
+    return;
+  }
+
+  if (!pressConsumed && nowMs - stablePressStartMs >= BUTTON_LONG_PRESS_MS) {
+    queueButtonEvent(stableButton, true);
+    pressConsumed = true;
+    lastRepeatMs = nowMs;
+    return;
+  }
+
+  if (uiMode == UI_EDIT &&
+      (stableButton == BUTTON_UP || stableButton == BUTTON_DOWN) &&
+      nowMs - stablePressStartMs >= BUTTON_REPEAT_START_MS &&
+      nowMs - lastRepeatMs >= BUTTON_REPEAT_INTERVAL_MS) {
+    queueButtonEvent(stableButton, false);
+    pressConsumed = true;
+    lastRepeatMs = nowMs;
+  }
+}
+
+void handleButtonEvent() {
+  if (!eventPending) {
+    return;
+  }
+
+  ButtonId button = eventButton;
+  bool isLong = eventIsLong;
+  eventPending = false;
+  eventButton = BUTTON_NONE;
+  eventIsLong = false;
+
+  ClockTime now;
+  bool clockHalted = false;
+  bool rtcOk = readRtc(now, clockHalted) && !clockHalted;
+
+  if (uiMode == UI_EDIT) {
+    if (button == BUTTON_FUNCTION) {
+      if (isLong) {
+        cancelEditMode();
+      } else {
+        saveEditTime();
+      }
+      return;
+    }
+
+    if (button == BUTTON_SELECT && !isLong) {
+      advanceEditField();
+      return;
+    }
+
+    if (button == BUTTON_UP && !isLong) {
+      adjustEditField(1);
+      return;
+    }
+
+    if (button == BUTTON_DOWN && !isLong) {
+      adjustEditField(-1);
+      return;
+    }
+
+    return;
+  }
+
+  Page page = getCurrentPage(millis());
+
+  if (button == BUTTON_FUNCTION && !isLong) {
+    holdManualPage(static_cast<Page>((page + 1) % PAGE_COUNT));
+    return;
+  }
+
+  if (button == BUTTON_UP && !isLong) {
+    holdManualPage(static_cast<Page>((page + PAGE_COUNT - 1) % PAGE_COUNT));
+    return;
+  }
+
+  if (button == BUTTON_DOWN && !isLong) {
+    holdManualPage(static_cast<Page>((page + 1) % PAGE_COUNT));
+    return;
+  }
+
+  if (button == BUTTON_SELECT && isLong) {
+    if (rtcOk) {
+      startEditMode(now);
+    }
+    return;
+  }
+
+  if (button == BUTTON_SELECT && !isLong) {
+    holdManualPage(page);
+  }
+}
+
 void updateDisplayContent() {
   unsigned long nowMs = millis();
   if (nowMs - lastContentMs < CONTENT_INTERVAL_MS) {
@@ -452,10 +777,15 @@ void updateDisplayContent() {
   }
   lastContentMs = nowMs;
 
-  Page page = static_cast<Page>((nowMs / PAGE_INTERVAL_MS) % PAGE_COUNT);
+  Page page = getCurrentPage(nowMs);
   ClockTime now;
   bool clockHalted = false;
   bool rtcOk = readRtc(now, clockHalted) && !clockHalted;
+
+  if (uiMode == UI_EDIT) {
+    showEditPage();
+    return;
+  }
 
   switch (page) {
     case PAGE_TIME:
@@ -513,6 +843,7 @@ void setup() {
 
   disableAllDigits();
   writeSegments(0);
+  pinMode(BUTTON_ADC_PIN, INPUT);
 
   dht.begin();
   setupRtc();
@@ -520,6 +851,8 @@ void setup() {
 
 void loop() {
   refreshDisplay();
+  updateButtons();
+  handleButtonEvent();
   updateSensors();
   updateDisplayContent();
 }
