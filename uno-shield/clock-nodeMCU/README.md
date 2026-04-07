@@ -30,7 +30,8 @@
 
 - `NodeMCU(ESP8266)` 1 块
 - 独立一位七段数码管 6 个
-- `74HCT595` 2 片
+- `74HC595 / 74HCT595` 2 片
+  你现在这类 `HG74HC595N` 符号属于 `74HC595` 命名体系，下文接线名按它的 `SER / SRCLK / RCLK / SRCLR# / QH'` 来写  
   推荐优先用 `74HCT595`，因为 `NodeMCU` 是 `3.3V` 逻辑，`74HC595` 在 `5V` 供电下高电平门限更紧，兼容性不如 `HCT`
 - `BC327` PNP 三极管 6 个
 - `330R` 电阻 8 个
@@ -49,15 +50,29 @@
 
 NodeMCU 只占 3 根控制线：
 
-- `D7(GPIO13)` -> `SER/DS`
-- `D5(GPIO14)` -> `SHCP/CLK`
-- `D6(GPIO12)` -> `STCP/LATCH`
+- `D7(GPIO13)` -> `SER`
+- `D5(GPIO14)` -> `SRCLK`
+- `D6(GPIO12)` -> `RCLK`
+
+其余固定连接建议：
+
+- `OE#` -> `GND`
+- `SRCLR#` -> `VCC`
 
 程序默认假设：
 
 - 第一片 `74HCT595` 负责 8 根段线
 - 第二片 `74HCT595` 负责 6 根位选
-- 两片通过 `Q7' -> SER` 级联
+- 两片通过 `QH' -> SER` 级联
+
+如果你用的是这张图里的 `HG74HC595N`，常见别名对应如下：
+
+- `SER` = `DS`
+- `SRCLK` = `SHCP` = `SRCK`
+- `RCLK` = `STCP` = `LATCH`
+- `SRCLR#` = `MR#`
+- `QH'` = `Q7'` = `Q7S`
+- `QA~QH` = `Q0~Q7`
 
 如果你实际级联顺序不同，需要同步调整代码里 `writeShiftRegisters()` 的字节输出顺序。
 
@@ -92,10 +107,15 @@ NodeMCU 只占 3 根控制线：
 
 ```text
 NodeMCU D7(GPIO13) ---- SER(74HCT595 #1)
-NodeMCU D5(GPIO14) ---- SHCP
-NodeMCU D6(GPIO12) ---- STCP
+NodeMCU D5(GPIO14) ---- SRCLK
+NodeMCU D6(GPIO12) ---- RCLK
 
-74HCT595 #1 Q7' ------- SER(74HCT595 #2)
+74HCT595 #1 OE# ------- GND
+74HCT595 #2 OE# ------- GND
+74HCT595 #1 SRCLR# ---- VCC
+74HCT595 #2 SRCLR# ---- VCC
+
+74HCT595 #1 QH' ------- SER(74HCT595 #2)
 
 74HCT595 #1 QA -------- 330R -------- 段 a
 74HCT595 #1 QB -------- 330R -------- 段 b
