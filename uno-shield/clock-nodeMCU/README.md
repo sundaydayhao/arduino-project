@@ -48,16 +48,32 @@
 
 ## 3. 引脚分配
 
+你这张 `NODEMCU(12F)` 原理图库符号，管脚名主要写成 `IOxx`。  
+它和开发板常见 `D` 口标注的对应关系如下：
+
+- `D7` = `GPIO13` = `IO13`
+- `D5` = `GPIO14` = `IO14`
+- `D6` = `GPIO12` = `IO12`
+
 NodeMCU 只占 3 根控制线：
 
-- `D7(GPIO13)` -> `SER`
-- `D5(GPIO14)` -> `SRCLK`
-- `D6(GPIO12)` -> `RCLK`
+- `D7(GPIO13 / IO13)` -> `SER`
+- `D5(GPIO14 / IO14)` -> `SRCLK`
+- `D6(GPIO12 / IO12)` -> `RCLK`
 
 其余固定连接建议：
 
 - `OE#` -> `GND`
 - `SRCLR#` -> `VCC`
+
+如果你按这张符号图直接布线，可以这样找脚：
+
+- `IO13` 是右侧 `21` 脚
+- `IO12` 是右侧 `22` 脚
+- `IO14` 是右侧 `23` 脚
+- `GND` 可用 `11 / 18 / 24` 脚
+- `3V3` 可用 `12 / 16 / 25` 脚
+- `5V` 是左侧 `15` 脚
 
 程序默认假设：
 
@@ -106,9 +122,9 @@ NodeMCU 只占 3 根控制线：
 下面是逻辑示意：
 
 ```text
-NodeMCU D7(GPIO13) ---- SER(74HCT595 #1)
-NodeMCU D5(GPIO14) ---- SRCLK
-NodeMCU D6(GPIO12) ---- RCLK
+NodeMCU IO13(D7 / GPIO13) ---- SER(74HCT595 #1)
+NodeMCU IO14(D5 / GPIO14) ---- SRCLK
+NodeMCU IO12(D6 / GPIO12) ---- RCLK
 
 74HCT595 #1 OE# ------- GND
 74HCT595 #2 OE# ------- GND
