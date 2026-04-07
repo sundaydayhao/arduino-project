@@ -21,10 +21,11 @@ const char *WEATHER_URL =
 constexpr uint8_t DIGIT_COUNT = 6;
 constexpr bool COMMON_ANODE = true;
 
-// 74HCT595 control pins on NodeMCU.
-constexpr uint8_t SHIFT_DATA_PIN = D7;
-constexpr uint8_t SHIFT_CLOCK_PIN = D5;
-constexpr uint8_t SHIFT_LATCH_PIN = D6;
+// 74HC595 control pins on NodeMCU(12F).
+// D7/D5/D6 on the dev board map to IO13/IO14/IO12 in some schematic symbols.
+constexpr uint8_t SHIFT_SER_PIN = D7;    // GPIO13 / IO13 -> SER
+constexpr uint8_t SHIFT_SRCLK_PIN = D5;  // GPIO14 / IO14 -> SRCLK
+constexpr uint8_t SHIFT_RCLK_PIN = D6;   // GPIO12 / IO12 -> RCLK
 
 constexpr unsigned long REFRESH_INTERVAL_US = 1200;
 constexpr unsigned long PAGE_INTERVAL_MS = 3500;
@@ -151,10 +152,10 @@ void setGlyph(uint8_t index, char ch, bool withDp = false) {
 }
 
 void writeShiftRegisters(uint8_t segmentState, uint8_t digitState) {
-  digitalWrite(SHIFT_LATCH_PIN, LOW);
-  shiftOut(SHIFT_DATA_PIN, SHIFT_CLOCK_PIN, MSBFIRST, digitState);
-  shiftOut(SHIFT_DATA_PIN, SHIFT_CLOCK_PIN, MSBFIRST, segmentState);
-  digitalWrite(SHIFT_LATCH_PIN, HIGH);
+  digitalWrite(SHIFT_RCLK_PIN, LOW);
+  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, digitState);
+  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, segmentState);
+  digitalWrite(SHIFT_RCLK_PIN, HIGH);
 }
 
 void blankDisplayOutput() {
@@ -443,9 +444,9 @@ void updateDisplayContent() {
 }
 
 void setup() {
-  pinMode(SHIFT_DATA_PIN, OUTPUT);
-  pinMode(SHIFT_CLOCK_PIN, OUTPUT);
-  pinMode(SHIFT_LATCH_PIN, OUTPUT);
+  pinMode(SHIFT_SER_PIN, OUTPUT);
+  pinMode(SHIFT_SRCLK_PIN, OUTPUT);
+  pinMode(SHIFT_RCLK_PIN, OUTPUT);
 
   blankDisplayOutput();
 

@@ -2,22 +2,26 @@
 #include <math.h>
 
 // ---------- User configuration ----------
+// Fixed 6-digit layout from left to right:
+// [0][1][2][3][4][5]
+//  HH.MM.SS / YY.MM.DD / t_23.5C / h_56.2H
 #define DIGIT_COUNT 6
-#define DHTPIN A2
-#define DHTTYPE DHT22   // Change to DHT11 if you use DHT11.
-#define RTC_CE_PIN A3
-#define RTC_IO_PIN A4
-#define RTC_SCLK_PIN A5
-#define BUTTON_ADC_PIN A0
+#define SHIFT_DATA_PIN 2
+#define SHIFT_CLOCK_PIN 3
+#define SHIFT_LATCH_PIN 4
+#define RTC_CE_PIN 5
+#define RTC_IO_PIN 6
+#define RTC_SCLK_PIN 7
+#define DHTPIN 8
+#define BUTTON_FUNCTION_PIN 9
+#define BUTTON_SELECT_PIN 10
+#define BUTTON_UP_PIN 11
+#define BUTTON_DOWN_PIN 12
+#define DHTTYPE DHT11   // Change to DHT22 if you use DHT22.
 
 // false: common cathode digits + NPN low-side digit transistors
 // true : common anode digits + PNP/P-MOS high-side digit transistors (18101BS default)
 const bool COMMON_ANODE = true;
-
-// Segment order: a, b, c, d, e, f, g, dp
-const uint8_t segmentPins[8] = {2, 3, 4, 5, 6, 7, 8, 9};
-// D1(TX) is reused as the 5th digit select so A0 can be reserved for the 4-key resistor ladder.
-const uint8_t digitPins[DIGIT_COUNT] = {10, 11, 12, 13, 1, A1};
 
 const unsigned long REFRESH_INTERVAL_US = 1000;
 const unsigned long PAGE_INTERVAL_MS = 3500;
@@ -55,6 +59,18 @@ enum ButtonId : uint8_t {
   BUTTON_SELECT = 2,
   BUTTON_UP = 3,
   BUTTON_DOWN = 4
+};
+
+// Two 74HC595 are daisy-chained:
+// Arduino -> segment 595 -> digit-select 595.
+// The first shifted byte reaches the far register (digit-select),
+// the second shifted byte stays in the near register (segments).
+const uint8_t buttonPins[BUTTON_DOWN + 1] = {
+  0,
+  BUTTON_FUNCTION_PIN,
+  BUTTON_SELECT_PIN,
+  BUTTON_UP_PIN,
+  BUTTON_DOWN_PIN
 };
 
 enum UiMode : uint8_t {
@@ -416,25 +432,13 @@ void adjustEditField(int delta) {
   }
 }
 
-ButtonId decodeButtonFromAdc(int adcValue) {
-  // Thresholds match a 10k pull-up on A0 and buttons to GND via 0R / 1k / 3.3k / 10k.
-  if (adcValue < 50) {
-    return BUTTON_FUNCTION;
-  }
-  if (adcValue < 170) {
-    return BUTTON_SELECT;
-  }
-  if (adcValue < 380) {
-    return BUTTON_UP;
-  }
-  if (adcValue < 700) {
-    return BUTTON_DOWN;
+ButtonId readButtonRaw() {
+  for (uint8_t button = BUTTON_FUNCTION; button <= BUTTON_DOWN; ++button) {
+    if (digitalRead(buttonPins[button]) == LOW) {
+      return static_cast<ButtonId>(button);
+    }
   }
   return BUTTON_NONE;
-}
-
-ButtonId readButtonRaw() {
-  return decodeButtonFromAdc(analogRead(BUTTON_ADC_PIN));
 }
 
 void queueButtonEvent(ButtonId button, bool isLong) {
@@ -490,24 +494,42 @@ void setGlyph(uint8_t index, char ch, bool withDp = false) {
   displayBuffer[index] = mask;
 }
 
-void writeSegments(uint8_t mask) {
-  for (uint8_t i = 0; i < 8; ++i) {
-    bool on = mask & (1 << i);
-    digitalWrite(segmentPins[i], COMMON_ANODE ? !on : on);
-  }
-}
-
-void enableDigit(uint8_t index, bool enabled) {
-  if (index >= DIGIT_COUNT) {
+void setTwoDigitValue(uint8_t startIndex, uint8_t value, bool secondDigitWithDp = false) {
+  if (startIndex + 1 >= DIGIT_COUNT) {
     return;
   }
-  digitalWrite(digitPins[index], COMMON_ANODE ? !enabled : enabled);
+
+  setGlyph(startIndex, '0' + (value / 10));
+  setGlyph(startIndex + 1, '0' + (value % 10), secondDigitWithDp);
 }
 
-void disableAllDigits() {
-  for (uint8_t i = 0; i < DIGIT_COUNT; ++i) {
-    enableDigit(i, false);
+uint8_t makeSegmentRegisterValue(uint8_t mask) {
+  return COMMON_ANODE ? static_cast<uint8_t>(~mask) : mask;
+}
+
+uint8_t makeDigitRegisterValue(uint8_t index, bool enabled) {
+  uint8_t value = COMMON_ANODE ? 0xFF : 0x00;
+  if (!enabled || index >= DIGIT_COUNT) {
+    return value;
   }
+
+  if (COMMON_ANODE) {
+    value &= ~(1 << index);
+  } else {
+    value |= (1 << index);
+  }
+  return value;
+}
+
+void writeShiftRegisters(uint8_t digitValue, uint8_t segmentValue) {
+  digitalWrite(SHIFT_LATCH_PIN, LOW);
+  shiftOut(SHIFT_DATA_PIN, SHIFT_CLOCK_PIN, MSBFIRST, digitValue);
+  shiftOut(SHIFT_DATA_PIN, SHIFT_CLOCK_PIN, MSBFIRST, segmentValue);
+  digitalWrite(SHIFT_LATCH_PIN, HIGH);
+}
+
+void blankDisplayOutputs() {
+  writeShiftRegisters(makeDigitRegisterValue(0, false), makeSegmentRegisterValue(0));
 }
 
 void refreshDisplay() {
@@ -517,9 +539,10 @@ void refreshDisplay() {
   }
   lastRefreshUs = nowUs;
 
-  disableAllDigits();
-  writeSegments(displayBuffer[currentDigit]);
-  enableDigit(currentDigit, true);
+  writeShiftRegisters(
+    makeDigitRegisterValue(currentDigit, true),
+    makeSegmentRegisterValue(displayBuffer[currentDigit])
+  );
   currentDigit = (currentDigit + 1) % DIGIT_COUNT;
 }
 
@@ -527,24 +550,18 @@ void showTime(const ClockTime &now) {
   clearDisplayBuffer();
 
   bool blink = (now.second % 2) == 0;
-  setGlyph(0, '0' + now.hour / 10);
-  setGlyph(1, '0' + now.hour % 10, blink);
-  setGlyph(2, '0' + now.minute / 10);
-  setGlyph(3, '0' + now.minute % 10, blink);
-  setGlyph(4, '0' + now.second / 10);
-  setGlyph(5, '0' + now.second % 10);
+  setTwoDigitValue(0, now.hour, blink);
+  setTwoDigitValue(2, now.minute, blink);
+  setTwoDigitValue(4, now.second);
 }
 
 void showDate(const ClockTime &now) {
   clearDisplayBuffer();
 
   uint8_t year2 = now.year % 100;
-  setGlyph(0, '0' + year2 / 10);
-  setGlyph(1, '0' + year2 % 10, true);
-  setGlyph(2, '0' + now.month / 10);
-  setGlyph(3, '0' + now.month % 10, true);
-  setGlyph(4, '0' + now.day / 10);
-  setGlyph(5, '0' + now.day % 10);
+  setTwoDigitValue(0, year2, true);
+  setTwoDigitValue(2, now.month, true);
+  setTwoDigitValue(4, now.day);
 }
 
 void blankDigits(uint8_t firstIndex, uint8_t count) {
@@ -833,17 +850,18 @@ void setupRtc() {
 }
 
 void setup() {
-  for (uint8_t i = 0; i < 8; ++i) {
-    pinMode(segmentPins[i], OUTPUT);
+  pinMode(SHIFT_DATA_PIN, OUTPUT);
+  pinMode(SHIFT_CLOCK_PIN, OUTPUT);
+  pinMode(SHIFT_LATCH_PIN, OUTPUT);
+  digitalWrite(SHIFT_DATA_PIN, LOW);
+  digitalWrite(SHIFT_CLOCK_PIN, LOW);
+  digitalWrite(SHIFT_LATCH_PIN, HIGH);
+
+  for (uint8_t button = BUTTON_FUNCTION; button <= BUTTON_DOWN; ++button) {
+    pinMode(buttonPins[button], INPUT_PULLUP);
   }
 
-  for (uint8_t i = 0; i < DIGIT_COUNT; ++i) {
-    pinMode(digitPins[i], OUTPUT);
-  }
-
-  disableAllDigits();
-  writeSegments(0);
-  pinMode(BUTTON_ADC_PIN, INPUT);
+  blankDisplayOutputs();
 
   dht.begin();
   setupRtc();
