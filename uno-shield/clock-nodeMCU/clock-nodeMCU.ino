@@ -3,6 +3,7 @@
 #include <WiFiClientSecureBearSSL.h>
 #include <ctype.h>
 #include <math.h>
+#include <string.h>
 #include <time.h>
 
 // ---------- User configuration ----------
@@ -85,6 +86,100 @@ unsigned long lastWiFiRetryMs = 0;
 float lastTemperature = NAN;
 float lastHumidity = NAN;
 bool weatherEverLoaded = false;
+int lastLoggedWiFiStatus = -1;
+time_t localClockBaseEpoch = 0;
+unsigned long localClockStartMs = 0;
+uint8_t lastLoggedSecond = 255;
+
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_DONE";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void logStartupConfig() {
+  Serial.println();
+  Serial.println(F("[BOOT] Clock starting"));
+  Serial.printf("[BOOT] WiFi SSID: %s\n", WIFI_SSID);
+  Serial.printf("[BOOT] Weather URL: %s\n", WEATHER_URL);
+  Serial.printf("[BOOT] Shift pins: SER=%u SRCLK=%u RCLK=%u\n", SHIFT_SER_PIN,
+                SHIFT_SRCLK_PIN, SHIFT_RCLK_PIN);
+  Serial.println(F("[BOOT] NTP servers: ntp1.aliyun.com, ntp.ntsc.ac.cn, pool.ntp.org"));
+}
+
+void logWiFiStatusIfChanged() {
+  wl_status_t status = WiFi.status();
+  if (static_cast<int>(status) == lastLoggedWiFiStatus) {
+    return;
+  }
+
+  lastLoggedWiFiStatus = static_cast<int>(status);
+  Serial.printf("[WIFI] Status -> %s (%d)\n", wifiStatusName(status),
+                static_cast<int>(status));
+
+  if (status == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    Serial.printf("[WIFI] Connected to %s, IP=%s, RSSI=%d dBm\n",
+                  WiFi.SSID().c_str(), ip.c_str(), WiFi.RSSI());
+  }
+}
+
+uint8_t parseBuildMonth(const char *monthText) {
+  static const char *const months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  for (uint8_t i = 0; i < 12; ++i) {
+    if (strncmp(monthText, months[i], 3) == 0) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+void initLocalClock() {
+  tm buildTime = {};
+  buildTime.tm_year = ((__DATE__[7] - '0') * 1000 + (__DATE__[8] - '0') * 100 +
+                       (__DATE__[9] - '0') * 10 + (__DATE__[10] - '0')) -
+                      1900;
+  buildTime.tm_mon = parseBuildMonth(__DATE__);
+  buildTime.tm_mday = ((__DATE__[4] == ' ') ? 0 : (__DATE__[4] - '0')) * 10 +
+                      (__DATE__[5] - '0');
+  buildTime.tm_hour = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
+  buildTime.tm_min = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
+  buildTime.tm_sec = (__TIME__[6] - '0') * 10 + (__TIME__[7] - '0');
+  buildTime.tm_isdst = -1;
+
+  localClockBaseEpoch = mktime(&buildTime);
+  localClockStartMs = millis();
+
+  Serial.printf("[CLOCK] Seeded from build time: %04d-%02d-%02d %02d:%02d:%02d\n",
+                buildTime.tm_year + 1900, buildTime.tm_mon + 1, buildTime.tm_mday,
+                buildTime.tm_hour, buildTime.tm_min, buildTime.tm_sec);
+}
+
+void logLocalClockIfNeeded(const ClockTime &clock) {
+  if (clock.second == lastLoggedSecond) {
+    return;
+  }
+
+  lastLoggedSecond = clock.second;
+  Serial.printf("[CLOCK] %04u-%02u-%02u %02u:%02u:%02u\n", clock.year, clock.month,
+                clock.day, clock.hour, clock.minute, clock.second);
+}
 
 uint8_t encodeChar(char ch) {
   if (ch >= '0' && ch <= '9') {
@@ -184,10 +279,12 @@ void refreshDisplay() {
 }
 
 bool getClockTime(ClockTime &clock) {
-  time_t now = time(nullptr);
-  if (now < 1700000000) {
+  if (localClockBaseEpoch == 0) {
     return false;
   }
+
+  time_t now = localClockBaseEpoch +
+               static_cast<time_t>((millis() - localClockStartMs) / 1000UL);
 
   tm timeInfo;
   localtime_r(&now, &timeInfo);
@@ -343,6 +440,7 @@ void ensureWiFiConnected() {
   }
   lastWiFiRetryMs = nowMs;
 
+  Serial.printf("[WIFI] Connecting to %s ...\n", WIFI_SSID);
   WiFi.disconnect();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
@@ -352,17 +450,21 @@ bool fetchWeatherNow() {
     return false;
   }
 
+  Serial.println(F("[WEATHER] Fetching current weather ..."));
+
   BearSSL::WiFiClientSecure client;
   client.setInsecure();
 
   HTTPClient https;
   if (!https.begin(client, WEATHER_URL)) {
+    Serial.println(F("[WEATHER] HTTPS begin failed"));
     return false;
   }
 
   https.setTimeout(6000);
   int httpCode = https.GET();
   if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[WEATHER] HTTP GET failed: %d\n", httpCode);
     https.end();
     return false;
   }
@@ -383,6 +485,24 @@ bool fetchWeatherNow() {
   }
 
   weatherEverLoaded = weatherEverLoaded || gotTemp || gotHumidity;
+  if (gotTemp || gotHumidity) {
+    Serial.print(F("[WEATHER] Updated: temp="));
+    if (gotTemp) {
+      Serial.print(lastTemperature, 1);
+      Serial.print(F("C"));
+    } else {
+      Serial.print(F("N/A"));
+    }
+    Serial.print(F(", humidity="));
+    if (gotHumidity) {
+      Serial.print(lastHumidity, 1);
+      Serial.println(F("%"));
+    } else {
+      Serial.println(F("N/A"));
+    }
+  } else {
+    Serial.println(F("[WEATHER] Parse failed: temperature_2m / relative_humidity_2m not found"));
+  }
   return gotTemp || gotHumidity;
 }
 
@@ -410,55 +530,31 @@ void updateDisplayContent() {
 
   ClockTime now;
   bool timeOk = getClockTime(now);
-  Page page = getCurrentPage(nowMs);
-
-  switch (page) {
-    case PAGE_TIME:
-      if (timeOk) {
-        showTime(now);
-      } else if (WiFi.status() == WL_CONNECTED) {
-        showStatusPage('n', 't');
-      } else {
-        showStatusPage('n', 'o');
-      }
-      break;
-    case PAGE_DATE:
-      if (timeOk) {
-        showDate(now);
-      } else if (WiFi.status() == WL_CONNECTED) {
-        showStatusPage('n', 't');
-      } else {
-        showStatusPage('n', 'o');
-      }
-      break;
-    case PAGE_TEMP:
-      showCompactFloat('t', lastTemperature, 'C');
-      break;
-    case PAGE_HUMI:
-      showCompactFloat('h', lastHumidity, 'H');
-      break;
-    default:
-      clearDisplayBuffer();
-      break;
+  if (timeOk) {
+    showTime(now);
+    logLocalClockIfNeeded(now);
+  } else {
+    showStatusPage('c', 'l');
   }
 }
 
 void setup() {
+  // Match the ESP8266 ROM boot log baud rate so startup output stays readable
+  // in a single serial monitor session.
+  Serial.begin(74880);
+  delay(50);
+  Serial.println();
+  Serial.println(F("[BOOT] Minimal local clock mode"));
+
   pinMode(SHIFT_SER_PIN, OUTPUT);
   pinMode(SHIFT_SRCLK_PIN, OUTPUT);
   pinMode(SHIFT_RCLK_PIN, OUTPUT);
 
   blankDisplayOutput();
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  configTime(8 * 3600, 0, "ntp1.aliyun.com", "ntp.ntsc.ac.cn", "pool.ntp.org");
+  initLocalClock();
 }
 
 void loop() {
   refreshDisplay();
-  ensureWiFiConnected();
-  updateWeather();
   updateDisplayContent();
 }
