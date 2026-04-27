@@ -90,7 +90,7 @@ NodeMCU 只占 3 根控制线：
 - `QH'` = `Q7'` = `Q7S`
 - `QA~QH` = `Q0~Q7`
 
-如果你实际级联顺序不同，需要同步调整代码里 `writeShiftRegisters()` 的字节输出顺序。
+如果你实际级联顺序不同，把代码里的 `FIRST_SHIFT_REGISTER_IS_SEGMENTS` 改成 `false`。
 
 ## 4. 数码管驱动方式
 
@@ -260,7 +260,20 @@ const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 - 然后自动同步 NTP
 - 之后每隔一段时间拉取一次天气温湿度
 
-## 11. 当前限制
+## 11. 显示排障
+
+程序启动时会先做一次显示自检：6 位数码管应该从左到右依次亮成 `8.`，每次只亮一位。
+
+如果现象不对，优先改 `clock-nodeMCU.ino` 顶部这几个配置：
+
+- 六位同时亮、位选不像在扫描：把 `DIGITS_ACTIVE_LOW` 改成 `false`
+- 每一位都像 `8`，所有段一直亮：把 `SEGMENTS_ACTIVE_LOW` 改成 `false`
+- 段线和位选像是互相串了：把 `FIRST_SHIFT_REGISTER_IS_SEGMENTS` 改成 `false`
+- 一上电就所有段、所有位全亮且自检不变化：检查 `SRCLR# / MR#` 必须接 `VCC`，`OE#` 必须接 `GND`
+
+如果使用的是 `74HC595` 且供电为 `5V`，NodeMCU 的 `3.3V` 高电平可能不够稳，建议换成 `74HCT595`，或让 `74HC595` 工作在 `3.3V` 并确认后级驱动电平匹配。
+
+## 12. 当前限制
 
 - 这个版本默认是 **6 个独立一位共阳数码管**
 - 默认是 **2 片 74HCT595 + 6 个 PNP 位选**
@@ -269,7 +282,7 @@ const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 - 如果设备从未联网成功，时间页会显示 `nt---` 或 `no---`
 - 当前没有保留按键设置时间，因为时间来源已经切到 NTP
 
-## 12. 可继续优化的方向
+## 13. 可继续优化的方向
 
 - 增加 `WiFiManager` 做配网，不再把 WiFi 写死在代码里
 - 把天气 API 换成你自己的服务商，例如和风天气或其他带 key 的接口

@@ -7,8 +7,8 @@
 #include <time.h>
 
 // ---------- User configuration ----------
-const char *WIFI_SSID = "YOUR_WIFI_SSID";
-const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char *WIFI_SSID = "haoge";
+const char *WIFI_PASSWORD = "19901118";
 
 // Default: Shanghai current weather from Open-Meteo.
 // You can replace latitude / longitude / timezone with your own location.
@@ -19,8 +19,21 @@ const char *WEATHER_URL =
     "&current=temperature_2m,relative_humidity_2m"
     "&timezone=Asia%2FShanghai";
 
+const char *NTP_SERVER_1 = "ntp1.aliyun.com";
+const char *NTP_SERVER_2 = "ntp.ntsc.ac.cn";
+const char *NTP_SERVER_3 = "pool.ntp.org";
+
 constexpr uint8_t DIGIT_COUNT = 6;
-constexpr bool COMMON_ANODE = true;
+// 18101BS common-anode display + BC327 high-side digit drivers:
+// segments light when LOW, digit select is enabled when LOW.
+// If all six digit positions stay on, try setting DIGITS_ACTIVE_LOW to false.
+// If every digit looks like "8", try setting SEGMENTS_ACTIVE_LOW to false.
+constexpr bool SEGMENTS_ACTIVE_LOW = true;
+constexpr bool DIGITS_ACTIVE_LOW = true;
+
+// true : NodeMCU -> 74HC595 #1(segments) -> 74HC595 #2(digits)
+// false: NodeMCU -> 74HC595 #1(digits)   -> 74HC595 #2(segments)
+constexpr bool FIRST_SHIFT_REGISTER_IS_SEGMENTS = true;
 
 // 74HC595 control pins on NodeMCU(12F).
 // D7/D5/D6 on the dev board map to IO13/IO14/IO12 in some schematic symbols.
@@ -29,10 +42,18 @@ constexpr uint8_t SHIFT_SRCLK_PIN = D5;  // GPIO14 / IO14 -> SRCLK
 constexpr uint8_t SHIFT_RCLK_PIN = D6;   // GPIO12 / IO12 -> RCLK
 
 constexpr unsigned long REFRESH_INTERVAL_US = 1200;
+constexpr unsigned int DIGIT_BLANKING_US = 40;
+constexpr bool ENABLE_POWER_ON_DISPLAY_SELF_TEST = true;
+constexpr unsigned int DISPLAY_SELF_TEST_STEP_MS = 120;
+constexpr uint8_t DISPLAY_SELF_TEST_PASSES = 1;
 constexpr unsigned long PAGE_INTERVAL_MS = 3500;
 constexpr unsigned long CONTENT_INTERVAL_MS = 100;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+constexpr unsigned long NTP_STATUS_INTERVAL_MS = 1000;
 constexpr unsigned long WEATHER_INTERVAL_MS = 10UL * 60UL * 1000UL;
+constexpr long TIMEZONE_OFFSET_SECONDS = 8L * 60L * 60L;
+constexpr int DAYLIGHT_OFFSET_SECONDS = 0;
+const time_t NTP_MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
 
 struct ClockTime {
   uint16_t year;
@@ -87,9 +108,10 @@ float lastTemperature = NAN;
 float lastHumidity = NAN;
 bool weatherEverLoaded = false;
 int lastLoggedWiFiStatus = -1;
-time_t localClockBaseEpoch = 0;
-unsigned long localClockStartMs = 0;
 uint8_t lastLoggedSecond = 255;
+bool ntpConfigured = false;
+bool ntpEverSynced = false;
+unsigned long lastNtpStatusMs = 0;
 
 const char *wifiStatusName(wl_status_t status) {
   switch (status) {
@@ -119,7 +141,9 @@ void logStartupConfig() {
   Serial.printf("[BOOT] Weather URL: %s\n", WEATHER_URL);
   Serial.printf("[BOOT] Shift pins: SER=%u SRCLK=%u RCLK=%u\n", SHIFT_SER_PIN,
                 SHIFT_SRCLK_PIN, SHIFT_RCLK_PIN);
-  Serial.println(F("[BOOT] NTP servers: ntp1.aliyun.com, ntp.ntsc.ac.cn, pool.ntp.org"));
+  Serial.printf("[BOOT] NTP servers: %s, %s, %s\n", NTP_SERVER_1, NTP_SERVER_2,
+                NTP_SERVER_3);
+  Serial.printf("[BOOT] Timezone: UTC+%ld\n", TIMEZONE_OFFSET_SECONDS / 3600L);
 }
 
 void logWiFiStatusIfChanged() {
@@ -139,36 +163,55 @@ void logWiFiStatusIfChanged() {
   }
 }
 
-uint8_t parseBuildMonth(const char *monthText) {
-  static const char *const months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  for (uint8_t i = 0; i < 12; ++i) {
-    if (strncmp(monthText, months[i], 3) == 0) {
-      return i;
-    }
+void configureNtp() {
+  if (ntpConfigured) {
+    return;
   }
-  return 0;
+
+  configTime(TIMEZONE_OFFSET_SECONDS, DAYLIGHT_OFFSET_SECONDS, NTP_SERVER_1,
+             NTP_SERVER_2, NTP_SERVER_3);
+  ntpConfigured = true;
+  Serial.println(F("[NTP] SNTP configured"));
 }
 
-void initLocalClock() {
-  tm buildTime = {};
-  buildTime.tm_year = ((__DATE__[7] - '0') * 1000 + (__DATE__[8] - '0') * 100 +
-                       (__DATE__[9] - '0') * 10 + (__DATE__[10] - '0')) -
-                      1900;
-  buildTime.tm_mon = parseBuildMonth(__DATE__);
-  buildTime.tm_mday = ((__DATE__[4] == ' ') ? 0 : (__DATE__[4] - '0')) * 10 +
-                      (__DATE__[5] - '0');
-  buildTime.tm_hour = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
-  buildTime.tm_min = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
-  buildTime.tm_sec = (__TIME__[6] - '0') * 10 + (__TIME__[7] - '0');
-  buildTime.tm_isdst = -1;
+void startWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lastWiFiRetryMs = millis();
+  Serial.printf("[WIFI] Connecting to %s ...\n", WIFI_SSID);
+}
 
-  localClockBaseEpoch = mktime(&buildTime);
-  localClockStartMs = millis();
+bool isNtpTimeValid(time_t epoch) {
+  return epoch >= NTP_MIN_VALID_EPOCH;
+}
 
-  Serial.printf("[CLOCK] Seeded from build time: %04d-%02d-%02d %02d:%02d:%02d\n",
-                buildTime.tm_year + 1900, buildTime.tm_mon + 1, buildTime.tm_mday,
-                buildTime.tm_hour, buildTime.tm_min, buildTime.tm_sec);
+void updateNtpStatus() {
+  unsigned long nowMs = millis();
+  if (nowMs - lastNtpStatusMs < NTP_STATUS_INTERVAL_MS) {
+    return;
+  }
+  lastNtpStatusMs = nowMs;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  time_t epoch = time(nullptr);
+  if (!isNtpTimeValid(epoch)) {
+    return;
+  }
+
+  if (!ntpEverSynced) {
+    tm timeInfo;
+    localtime_r(&epoch, &timeInfo);
+    Serial.printf("[NTP] Synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  timeInfo.tm_year + 1900, timeInfo.tm_mon + 1,
+                  timeInfo.tm_mday, timeInfo.tm_hour, timeInfo.tm_min,
+                  timeInfo.tm_sec);
+  }
+  ntpEverSynced = true;
 }
 
 void logLocalClockIfNeeded(const ClockTime &clock) {
@@ -246,15 +289,58 @@ void setGlyph(uint8_t index, char ch, bool withDp = false) {
   displayBuffer[index] = mask;
 }
 
+uint8_t makeSegmentRegisterValue(uint8_t mask) {
+  return SEGMENTS_ACTIVE_LOW ? static_cast<uint8_t>(~mask) : mask;
+}
+
+uint8_t makeDigitRegisterValue(uint8_t index, bool enabled) {
+  uint8_t value = DIGITS_ACTIVE_LOW ? 0xFF : 0x00;
+  if (!enabled || index >= DIGIT_COUNT) {
+    return value;
+  }
+
+  if (DIGITS_ACTIVE_LOW) {
+    value &= static_cast<uint8_t>(~(1U << index));
+  } else {
+    value |= static_cast<uint8_t>(1U << index);
+  }
+  return value;
+}
+
 void writeShiftRegisters(uint8_t segmentState, uint8_t digitState) {
+  uint8_t firstShiftedByte =
+      FIRST_SHIFT_REGISTER_IS_SEGMENTS ? digitState : segmentState;
+  uint8_t secondShiftedByte =
+      FIRST_SHIFT_REGISTER_IS_SEGMENTS ? segmentState : digitState;
+
   digitalWrite(SHIFT_RCLK_PIN, LOW);
-  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, digitState);
-  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, segmentState);
+  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, firstShiftedByte);
+  shiftOut(SHIFT_SER_PIN, SHIFT_SRCLK_PIN, MSBFIRST, secondShiftedByte);
   digitalWrite(SHIFT_RCLK_PIN, HIGH);
 }
 
 void blankDisplayOutput() {
-  writeShiftRegisters(COMMON_ANODE ? 0xFF : 0x00, COMMON_ANODE ? 0xFF : 0x00);
+  writeShiftRegisters(makeSegmentRegisterValue(0),
+                      makeDigitRegisterValue(0, false));
+}
+
+void runPowerOnDisplaySelfTest() {
+  if (!ENABLE_POWER_ON_DISPLAY_SELF_TEST) {
+    return;
+  }
+
+  const uint8_t allSegments = SEG_A | SEG_B | SEG_C | SEG_D |
+                              SEG_E | SEG_F | SEG_G | SEG_DP;
+
+  for (uint8_t pass = 0; pass < DISPLAY_SELF_TEST_PASSES; ++pass) {
+    for (uint8_t digit = 0; digit < DIGIT_COUNT; ++digit) {
+      writeShiftRegisters(makeSegmentRegisterValue(allSegments),
+                          makeDigitRegisterValue(digit, true));
+      delay(DISPLAY_SELF_TEST_STEP_MS);
+    }
+  }
+
+  blankDisplayOutput();
 }
 
 void refreshDisplay() {
@@ -264,27 +350,19 @@ void refreshDisplay() {
   }
   lastRefreshUs = nowUs;
 
-  uint8_t mask = displayBuffer[currentDigit];
-  uint8_t segmentState = COMMON_ANODE ? static_cast<uint8_t>(~mask) : mask;
-  uint8_t digitState = COMMON_ANODE ? 0xFF : 0x00;
+  blankDisplayOutput();
+  delayMicroseconds(DIGIT_BLANKING_US);
 
-  if (COMMON_ANODE) {
-    digitState &= static_cast<uint8_t>(~(1U << currentDigit));
-  } else {
-    digitState |= static_cast<uint8_t>(1U << currentDigit);
-  }
-
-  writeShiftRegisters(segmentState, digitState);
+  writeShiftRegisters(makeSegmentRegisterValue(displayBuffer[currentDigit]),
+                      makeDigitRegisterValue(currentDigit, true));
   currentDigit = (currentDigit + 1) % DIGIT_COUNT;
 }
 
 bool getClockTime(ClockTime &clock) {
-  if (localClockBaseEpoch == 0) {
+  time_t now = time(nullptr);
+  if (!isNtpTimeValid(now)) {
     return false;
   }
-
-  time_t now = localClockBaseEpoch +
-               static_cast<time_t>((millis() - localClockStartMs) / 1000UL);
 
   tm timeInfo;
   localtime_r(&now, &timeInfo);
@@ -435,13 +513,13 @@ void ensureWiFiConnected() {
   }
 
   unsigned long nowMs = millis();
-  if (nowMs - lastWiFiRetryMs < WIFI_RETRY_INTERVAL_MS) {
+  if (lastWiFiRetryMs != 0 &&
+      nowMs - lastWiFiRetryMs < WIFI_RETRY_INTERVAL_MS) {
     return;
   }
   lastWiFiRetryMs = nowMs;
 
   Serial.printf("[WIFI] Connecting to %s ...\n", WIFI_SSID);
-  WiFi.disconnect();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
 
@@ -533,8 +611,10 @@ void updateDisplayContent() {
   if (timeOk) {
     showTime(now);
     logLocalClockIfNeeded(now);
+  } else if (WiFi.status() == WL_CONNECTED) {
+    showStatusPage('n', 't');
   } else {
-    showStatusPage('c', 'l');
+    showStatusPage('n', 'o');
   }
 }
 
@@ -544,17 +624,31 @@ void setup() {
   Serial.begin(74880);
   delay(50);
   Serial.println();
-  Serial.println(F("[BOOT] Minimal local clock mode"));
+  Serial.println(F("[BOOT] NTP clock mode"));
+  logStartupConfig();
+  Serial.printf("[BOOT] Display config: segmentsActiveLow=%s digitsActiveLow=%s first595=%s blanking=%u us\n",
+                SEGMENTS_ACTIVE_LOW ? "true" : "false",
+                DIGITS_ACTIVE_LOW ? "true" : "false",
+                FIRST_SHIFT_REGISTER_IS_SEGMENTS ? "segments" : "digits",
+                DIGIT_BLANKING_US);
 
   pinMode(SHIFT_SER_PIN, OUTPUT);
   pinMode(SHIFT_SRCLK_PIN, OUTPUT);
   pinMode(SHIFT_RCLK_PIN, OUTPUT);
+  digitalWrite(SHIFT_SER_PIN, LOW);
+  digitalWrite(SHIFT_SRCLK_PIN, LOW);
+  digitalWrite(SHIFT_RCLK_PIN, HIGH);
 
   blankDisplayOutput();
-  initLocalClock();
+  runPowerOnDisplaySelfTest();
+  startWiFi();
+  configureNtp();
 }
 
 void loop() {
   refreshDisplay();
+  ensureWiFiConnected();
+  logWiFiStatusIfChanged();
+  updateNtpStatus();
   updateDisplayContent();
 }
