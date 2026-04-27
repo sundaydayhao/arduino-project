@@ -1,5 +1,6 @@
 #include <DHT.h>
 #include <math.h>
+#include <string.h>
 
 // ---------- User configuration ----------
 // Fixed 6-digit layout from left to right:
@@ -22,16 +23,34 @@
 // false: common cathode digits + NPN low-side digit transistors
 // true : common anode digits + PNP/P-MOS high-side digit transistors (18101BS default)
 const bool COMMON_ANODE = true;
+const bool ENABLE_SENSOR_PAGES = true;
+const bool ENABLE_SERIAL_DEBUG = true;
+const bool FORCE_RTC_SET_FROM_COMPILE_TIME_ON_BOOT = false;
+const bool SET_RTC_FROM_COMPILE_TIME_IF_RTC_IS_OLDER = true;
+const bool TIME_SEPARATOR_DOTS_ALWAYS_ON = true;
+const bool DEBUG_PRINT_EVERY_RTC_SECOND = false;
 
 const unsigned long REFRESH_INTERVAL_US = 1000;
-const unsigned long PAGE_INTERVAL_MS = 3500;
-const unsigned long SENSOR_INTERVAL_MS = 2000;
+const unsigned long AUTO_DISPLAY_CYCLE_MS = 60000;
+const unsigned long AUTO_DATE_DISPLAY_MS = 5000;
+const unsigned long AUTO_TEMP_DISPLAY_MS = 5000;
+const unsigned long AUTO_HUMI_DISPLAY_MS = 5000;
+const unsigned long SENSOR_INTERVAL_MS = 10000;
 const unsigned long CONTENT_INTERVAL_MS = 100;
+const unsigned long RTC_POLL_INTERVAL_MS = 1000;
 const unsigned long BUTTON_DEBOUNCE_MS = 30;
 const unsigned long BUTTON_LONG_PRESS_MS = 800;
 const unsigned long BUTTON_REPEAT_START_MS = 500;
 const unsigned long BUTTON_REPEAT_INTERVAL_MS = 180;
 const unsigned long MANUAL_PAGE_HOLD_MS = 10000;
+const bool ENABLE_POWER_ON_DISPLAY_SELF_TEST = true;
+const unsigned int DISPLAY_SELF_TEST_STEP_MS = 90;
+const uint8_t DISPLAY_SELF_TEST_PASSES = 2;
+const unsigned int DIGIT_BLANKING_US = 40;
+const unsigned long SERIAL_DEBUG_BAUD = 115200;
+const uint8_t SERIAL_COMMAND_BUFFER_SIZE = 40;
+const uint8_t RTC_READ_RETRY_COUNT = 5;
+const unsigned int RTC_READ_RETRY_DELAY_US = 500;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -52,6 +71,8 @@ enum Page : uint8_t {
   PAGE_HUMI = 3,
   PAGE_COUNT = 4
 };
+
+const uint8_t VIEW_PAGE_COUNT = ENABLE_SENSOR_PAGES ? PAGE_COUNT : PAGE_TEMP;
 
 enum ButtonId : uint8_t {
   BUTTON_NONE = 0,
@@ -118,6 +139,7 @@ uint8_t currentDigit = 0;
 unsigned long lastRefreshUs = 0;
 unsigned long lastSensorMs = 0;
 unsigned long lastContentMs = 0;
+unsigned long lastRtcPollMs = 0;
 
 float lastTemperature = NAN;
 float lastHumidity = NAN;
@@ -137,10 +159,242 @@ bool pressConsumed = false;
 unsigned long lastButtonChangeMs = 0;
 unsigned long stablePressStartMs = 0;
 unsigned long lastRepeatMs = 0;
+char serialCommandBuffer[SERIAL_COMMAND_BUFFER_SIZE] = {0};
+uint8_t serialCommandLength = 0;
+ClockTime cachedRtcTime = {2026, 1, 1, 1, 0, 0, 0};
+bool hasCachedRtcTime = false;
+unsigned long cachedRtcMillis = 0;
 
 const uint8_t DS1302_REG_WP = 0x8E;
 const uint8_t DS1302_CMD_CLOCK_BURST_READ = 0xBF;
 const uint8_t DS1302_CMD_CLOCK_BURST_WRITE = 0xBE;
+
+const char *pageName(Page page) {
+  switch (page) {
+    case PAGE_TIME:
+      return "time";
+    case PAGE_DATE:
+      return "date";
+    case PAGE_TEMP:
+      return "temp";
+    case PAGE_HUMI:
+      return "humi";
+    default:
+      return "unknown";
+  }
+}
+
+const char *buttonName(ButtonId button) {
+  switch (button) {
+    case BUTTON_FUNCTION:
+      return "function";
+    case BUTTON_SELECT:
+      return "select";
+    case BUTTON_UP:
+      return "up";
+    case BUTTON_DOWN:
+      return "down";
+    default:
+      return "none";
+  }
+}
+
+const char *editFieldName(EditField field) {
+  switch (field) {
+    case EDIT_HOUR:
+      return "hour";
+    case EDIT_MINUTE:
+      return "minute";
+    case EDIT_SECOND:
+      return "second";
+    case EDIT_YEAR:
+      return "year";
+    case EDIT_MONTH:
+      return "month";
+    case EDIT_DAY:
+      return "day";
+    default:
+      return "unknown";
+  }
+}
+
+void debugPrintTwoDigits(uint8_t value) {
+  if (value < 10) {
+    Serial.print('0');
+  }
+  Serial.print(value);
+}
+
+void debugPrintDateTime(const ClockTime &time) {
+  Serial.print(time.year);
+  Serial.print('-');
+  debugPrintTwoDigits(time.month);
+  Serial.print('-');
+  debugPrintTwoDigits(time.day);
+  Serial.print(' ');
+  debugPrintTwoDigits(time.hour);
+  Serial.print(':');
+  debugPrintTwoDigits(time.minute);
+  Serial.print(':');
+  debugPrintTwoDigits(time.second);
+}
+
+void debugPrintConfig() {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  Serial.print(F("[clock] config commonAnode="));
+  Serial.print(COMMON_ANODE ? F("true") : F("false"));
+  Serial.print(F(" sensorPages="));
+  Serial.print(ENABLE_SENSOR_PAGES ? F("true") : F("false"));
+  Serial.print(F(" viewPages="));
+  Serial.print(VIEW_PAGE_COUNT);
+  Serial.print(F(" cycleMs="));
+  Serial.print(AUTO_DISPLAY_CYCLE_MS);
+  Serial.print(F(" dateMs="));
+  Serial.print(AUTO_DATE_DISPLAY_MS);
+  Serial.print(F(" tempMs="));
+  Serial.print(ENABLE_SENSOR_PAGES ? AUTO_TEMP_DISPLAY_MS : 0);
+  Serial.print(F(" humiMs="));
+  Serial.print(ENABLE_SENSOR_PAGES ? AUTO_HUMI_DISPLAY_MS : 0);
+  Serial.print(F(" refreshUs="));
+  Serial.print(REFRESH_INTERVAL_US);
+  Serial.print(F(" blankingUs="));
+  Serial.print(DIGIT_BLANKING_US);
+  Serial.print(F(" selfTest="));
+  Serial.print(ENABLE_POWER_ON_DISPLAY_SELF_TEST ? F("true") : F("false"));
+  Serial.print(F(" forceRtcCompile="));
+  Serial.print(FORCE_RTC_SET_FROM_COMPILE_TIME_ON_BOOT ? F("true") : F("false"));
+  Serial.print(F(" syncOldRtc="));
+  Serial.print(SET_RTC_FROM_COMPILE_TIME_IF_RTC_IS_OLDER ? F("true") : F("false"));
+  Serial.print(F(" timeDotsAlwaysOn="));
+  Serial.print(TIME_SEPARATOR_DOTS_ALWAYS_ON ? F("true") : F("false"));
+  Serial.print(F(" rtcPollMs="));
+  Serial.print(RTC_POLL_INTERVAL_MS);
+  Serial.print(F(" debugEverySecond="));
+  Serial.println(DEBUG_PRINT_EVERY_RTC_SECOND ? F("true") : F("false"));
+}
+
+void debugPrintSerialHelp() {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  Serial.println(F("[clock] serial commands:"));
+  Serial.println(F("[clock]   TIME?"));
+  Serial.println(F("[clock]   SET 2026-04-28 23:05:00"));
+  Serial.println(F("[clock]   COMPILE"));
+}
+
+void debugPrintRtcStatus(const char *label,
+                         const ClockTime &time,
+                         bool rtcReadOk,
+                         bool clockHalted) {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  Serial.print(F("[clock] "));
+  Serial.print(label);
+  Serial.print(F(" rtcReadOk="));
+  Serial.print(rtcReadOk ? F("true") : F("false"));
+  Serial.print(F(" halted="));
+  Serial.print(clockHalted ? F("true") : F("false"));
+  if (rtcReadOk) {
+    Serial.print(F(" time="));
+    debugPrintDateTime(time);
+  }
+  Serial.println();
+}
+
+void debugPrintButtonEvent(ButtonId button, bool isLong) {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  Serial.print(F("[clock] button "));
+  Serial.print(buttonName(button));
+  Serial.print(isLong ? F(" long") : F(" short"));
+  Serial.print(F(" mode="));
+  Serial.println(uiMode == UI_EDIT ? F("edit") : F("view"));
+}
+
+void debugPrintEditState(const char *action) {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  Serial.print(F("[clock] edit "));
+  Serial.print(action);
+  Serial.print(F(" field="));
+  Serial.print(editFieldName(editField));
+  Serial.print(F(" value="));
+  debugPrintDateTime(editTime);
+  Serial.println();
+}
+
+void debugReportDisplayState(Page page,
+                             bool rtcOk,
+                             bool clockHalted,
+                             const ClockTime &now) {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  static bool hasLastState = false;
+  static UiMode lastMode = UI_VIEW;
+  static Page lastPage = PAGE_COUNT;
+  static bool lastRtcOk = false;
+  static bool lastClockHalted = false;
+  static bool lastPrintedHadRtcTime = false;
+  static ClockTime lastPrintedRtcTime = {2000, 1, 1, 1, 0, 0, 0};
+
+  bool stateChanged = !hasLastState ||
+                      lastMode != uiMode ||
+                      lastPage != page ||
+                      lastRtcOk != rtcOk ||
+                      lastClockHalted != clockHalted;
+
+  bool rtcTimeChanged = false;
+  if (DEBUG_PRINT_EVERY_RTC_SECOND && rtcOk) {
+    rtcTimeChanged = !lastPrintedHadRtcTime ||
+                     lastPrintedRtcTime.year != now.year ||
+                     lastPrintedRtcTime.month != now.month ||
+                     lastPrintedRtcTime.day != now.day ||
+                     lastPrintedRtcTime.hour != now.hour ||
+                     lastPrintedRtcTime.minute != now.minute ||
+                     lastPrintedRtcTime.second != now.second;
+  }
+
+  if (!stateChanged && !rtcTimeChanged) {
+    return;
+  }
+
+  hasLastState = true;
+  lastMode = uiMode;
+  lastPage = page;
+  lastRtcOk = rtcOk;
+  lastClockHalted = clockHalted;
+  if (rtcOk) {
+    lastPrintedRtcTime = now;
+    lastPrintedHadRtcTime = true;
+  } else {
+    lastPrintedHadRtcTime = false;
+  }
+
+  Serial.print(F("[clock] display mode="));
+  Serial.print(uiMode == UI_EDIT ? F("edit") : F("view"));
+  Serial.print(F(" page="));
+  Serial.print(pageName(page));
+  Serial.print(F(" rtc="));
+  Serial.print(rtcOk ? F("ok") : (clockHalted ? F("halted") : F("invalid")));
+  if (rtcOk) {
+    Serial.print(F(" time="));
+    debugPrintDateTime(now);
+  }
+  Serial.println();
+}
 
 uint8_t bcdToDec(uint8_t value) {
   return ((value >> 4) * 10) + (value & 0x0F);
@@ -291,7 +545,12 @@ void ds1302SetWriteProtect(bool enabled) {
   ds1302WriteRegister(DS1302_REG_WP, enabled ? 0x80 : 0x00);
 }
 
-bool readRtc(ClockTime &time, bool &clockHalted) {
+uint32_t secondsSince2000(const ClockTime &time);
+bool isBefore(const ClockTime &left, const ClockTime &right);
+void cacheRtcTime(const ClockTime &time);
+bool readCachedRtcTime(ClockTime &time);
+
+bool readRtcRaw(ClockTime &time, bool &clockHalted) {
   uint8_t burst[8] = {0};
   ds1302ReadBurst(burst, 8);
 
@@ -318,6 +577,60 @@ bool readRtc(ClockTime &time, bool &clockHalted) {
   return isValidClockTime(time);
 }
 
+bool isRtcTimePlausible(const ClockTime &time) {
+  if (!SET_RTC_FROM_COMPILE_TIME_IF_RTC_IS_OLDER) {
+    return true;
+  }
+
+  ClockTime compileTime = compileTimeToClockTime();
+  return !isBefore(time, compileTime);
+}
+
+bool readRtc(ClockTime &time, bool &clockHalted) {
+  ClockTime haltedTime;
+  bool sawPlausibleHaltedTime = false;
+
+  for (uint8_t attempt = 0; attempt < RTC_READ_RETRY_COUNT; ++attempt) {
+    ClockTime candidate;
+    bool candidateHalted = false;
+    bool candidateValid = readRtcRaw(candidate, candidateHalted);
+    bool candidatePlausible = candidateValid && isRtcTimePlausible(candidate);
+
+    if (candidatePlausible && !candidateHalted) {
+      time = candidate;
+      clockHalted = false;
+      cacheRtcTime(time);
+      return true;
+    }
+
+    if (candidatePlausible && candidateHalted && !sawPlausibleHaltedTime) {
+      haltedTime = candidate;
+      sawPlausibleHaltedTime = true;
+    }
+
+    delayMicroseconds(RTC_READ_RETRY_DELAY_US);
+  }
+
+  if (sawPlausibleHaltedTime) {
+    if (readCachedRtcTime(time)) {
+      clockHalted = false;
+      return true;
+    }
+
+    time = haltedTime;
+    clockHalted = true;
+    return true;
+  }
+
+  if (readCachedRtcTime(time)) {
+    clockHalted = false;
+    return true;
+  }
+
+  clockHalted = false;
+  return false;
+}
+
 void writeRtc(const ClockTime &time) {
   uint8_t burst[8];
   burst[0] = decToBcd(time.second) & 0x7F;
@@ -332,6 +645,229 @@ void writeRtc(const ClockTime &time) {
   ds1302SetWriteProtect(false);
   ds1302WriteBurst(burst, 8);
   ds1302SetWriteProtect(true);
+  cacheRtcTime(time);
+}
+
+void advanceClockTime(ClockTime &time, uint32_t secondsToAdd) {
+  uint32_t totalSeconds = time.second + secondsToAdd;
+  time.second = totalSeconds % 60;
+
+  uint32_t totalMinutes = time.minute + (totalSeconds / 60);
+  time.minute = totalMinutes % 60;
+
+  uint32_t totalHours = time.hour + (totalMinutes / 60);
+  time.hour = totalHours % 24;
+
+  uint32_t daysToAdd = totalHours / 24;
+  while (daysToAdd > 0) {
+    ++time.day;
+    if (time.day > daysInMonth(time.year, time.month)) {
+      time.day = 1;
+      ++time.month;
+      if (time.month > 12) {
+        time.month = 1;
+        ++time.year;
+      }
+    }
+    --daysToAdd;
+  }
+
+  time.dayOfWeek = calculateDayOfWeek(time.year, time.month, time.day);
+}
+
+void cacheRtcTime(const ClockTime &time) {
+  cachedRtcTime = time;
+  cachedRtcMillis = millis();
+  hasCachedRtcTime = true;
+}
+
+bool readCachedRtcTime(ClockTime &time) {
+  if (!hasCachedRtcTime) {
+    return false;
+  }
+
+  time = cachedRtcTime;
+  advanceClockTime(time, (millis() - cachedRtcMillis) / 1000UL);
+  return isValidClockTime(time);
+}
+
+uint32_t secondsSince2000(const ClockTime &time) {
+  uint32_t days = 0;
+  for (uint16_t year = 2000; year < time.year; ++year) {
+    days += isLeapYear(year) ? 366UL : 365UL;
+  }
+  for (uint8_t month = 1; month < time.month; ++month) {
+    days += daysInMonth(time.year, month);
+  }
+  days += time.day - 1;
+
+  return days * 86400UL +
+         static_cast<uint32_t>(time.hour) * 3600UL +
+         static_cast<uint32_t>(time.minute) * 60UL +
+         time.second;
+}
+
+bool isBefore(const ClockTime &left, const ClockTime &right) {
+  return secondsSince2000(left) < secondsSince2000(right);
+}
+
+bool parseFixedDigits(const char *&cursor, uint8_t digitCount, uint16_t &value) {
+  value = 0;
+  for (uint8_t i = 0; i < digitCount; ++i) {
+    char ch = cursor[i];
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+    value = value * 10 + (ch - '0');
+  }
+  cursor += digitCount;
+  return true;
+}
+
+bool consumeChar(const char *&cursor, char expected) {
+  if (*cursor != expected) {
+    return false;
+  }
+  ++cursor;
+  return true;
+}
+
+bool parseSetTimeCommand(const char *command, ClockTime &time) {
+  if (strncmp(command, "SET ", 4) != 0) {
+    return false;
+  }
+
+  const char *cursor = command + 4;
+  uint16_t year;
+  uint16_t month;
+  uint16_t day;
+  uint16_t hour;
+  uint16_t minute;
+  uint16_t second;
+
+  if (!parseFixedDigits(cursor, 4, year) ||
+      !consumeChar(cursor, '-') ||
+      !parseFixedDigits(cursor, 2, month) ||
+      !consumeChar(cursor, '-') ||
+      !parseFixedDigits(cursor, 2, day) ||
+      !consumeChar(cursor, ' ') ||
+      !parseFixedDigits(cursor, 2, hour) ||
+      !consumeChar(cursor, ':') ||
+      !parseFixedDigits(cursor, 2, minute) ||
+      !consumeChar(cursor, ':') ||
+      !parseFixedDigits(cursor, 2, second)) {
+    return false;
+  }
+
+  while (*cursor == ' ') {
+    ++cursor;
+  }
+  if (*cursor != '\0') {
+    return false;
+  }
+
+  ClockTime parsed = {
+    year,
+    static_cast<uint8_t>(month),
+    static_cast<uint8_t>(day),
+    1,
+    static_cast<uint8_t>(hour),
+    static_cast<uint8_t>(minute),
+    static_cast<uint8_t>(second)
+  };
+
+  if (parsed.year < 2000 || parsed.year > 2099 ||
+      parsed.month < 1 || parsed.month > 12 ||
+      parsed.day < 1 || parsed.day > 31 ||
+      parsed.hour > 23 || parsed.minute > 59 || parsed.second > 59) {
+    return false;
+  }
+
+  parsed.dayOfWeek = calculateDayOfWeek(parsed.year, parsed.month, parsed.day);
+
+  if (!isValidClockTime(parsed)) {
+    return false;
+  }
+
+  time = parsed;
+  return true;
+}
+
+void printRtcNow(const char *label) {
+  ClockTime now;
+  bool clockHalted = false;
+  bool rtcReadOk = readRtc(now, clockHalted);
+  debugPrintRtcStatus(label, now, rtcReadOk, clockHalted);
+}
+
+void processSerialCommand(const char *command) {
+  if (!ENABLE_SERIAL_DEBUG || command[0] == '\0') {
+    return;
+  }
+
+  if (strcmp(command, "HELP") == 0) {
+    debugPrintSerialHelp();
+    return;
+  }
+
+  if (strcmp(command, "TIME?") == 0 || strcmp(command, "READ") == 0) {
+    printRtcNow("rtc serial read");
+    return;
+  }
+
+  if (strcmp(command, "COMPILE") == 0) {
+    ClockTime compileTime = compileTimeToClockTime();
+    writeRtc(compileTime);
+    Serial.print(F("[clock] rtc serial set compileTime="));
+    debugPrintDateTime(compileTime);
+    Serial.println();
+    printRtcNow("rtc after serial set");
+    return;
+  }
+
+  ClockTime requestedTime;
+  if (parseSetTimeCommand(command, requestedTime)) {
+    writeRtc(requestedTime);
+    Serial.print(F("[clock] rtc serial set time="));
+    debugPrintDateTime(requestedTime);
+    Serial.println();
+    printRtcNow("rtc after serial set");
+    return;
+  }
+
+  Serial.print(F("[clock] unknown command: "));
+  Serial.println(command);
+  debugPrintSerialHelp();
+}
+
+void updateSerialCommands() {
+  if (!ENABLE_SERIAL_DEBUG) {
+    return;
+  }
+
+  while (Serial.available() > 0) {
+    char ch = static_cast<char>(Serial.read());
+    if (ch == '\r') {
+      continue;
+    }
+
+    if (ch == '\n') {
+      serialCommandBuffer[serialCommandLength] = '\0';
+      processSerialCommand(serialCommandBuffer);
+      serialCommandLength = 0;
+      serialCommandBuffer[0] = '\0';
+      continue;
+    }
+
+    if (serialCommandLength + 1 >= SERIAL_COMMAND_BUFFER_SIZE) {
+      serialCommandLength = 0;
+      serialCommandBuffer[0] = '\0';
+      Serial.println(F("[clock] serial command too long"));
+      continue;
+    }
+
+    serialCommandBuffer[serialCommandLength++] = ch;
+  }
 }
 
 int wrapValue(int value, int minValue, int maxValue) {
@@ -373,12 +909,38 @@ Page getCurrentPage(unsigned long nowMs) {
     return manualPage;
   }
 
-  return static_cast<Page>((nowMs / PAGE_INTERVAL_MS) % PAGE_COUNT);
+  unsigned long cycleMs = nowMs % AUTO_DISPLAY_CYCLE_MS;
+  unsigned long tailStartMs = AUTO_DISPLAY_CYCLE_MS;
+
+  if (ENABLE_SENSOR_PAGES) {
+    tailStartMs -= AUTO_HUMI_DISPLAY_MS;
+    if (cycleMs >= tailStartMs) {
+      return PAGE_HUMI;
+    }
+
+    tailStartMs -= AUTO_TEMP_DISPLAY_MS;
+    if (cycleMs >= tailStartMs) {
+      return PAGE_TEMP;
+    }
+  }
+
+  tailStartMs -= AUTO_DATE_DISPLAY_MS;
+  if (cycleMs >= tailStartMs) {
+    return PAGE_DATE;
+  }
+
+  return PAGE_TIME;
 }
 
 void holdManualPage(Page page) {
   manualPage = page;
   manualPageUntilMs = millis() + MANUAL_PAGE_HOLD_MS;
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.print(F("[clock] hold page="));
+    Serial.print(pageName(page));
+    Serial.print(F(" untilMs="));
+    Serial.println(manualPageUntilMs);
+  }
 }
 
 void startEditMode(const ClockTime &currentTime) {
@@ -386,10 +948,12 @@ void startEditMode(const ClockTime &currentTime) {
   normalizeEditDate();
   editField = EDIT_HOUR;
   uiMode = UI_EDIT;
+  debugPrintEditState("start");
 }
 
 void saveEditTime() {
   normalizeEditDate();
+  debugPrintEditState("save");
   writeRtc(editTime);
   uiMode = UI_VIEW;
   holdManualPage(PAGE_TIME);
@@ -397,11 +961,13 @@ void saveEditTime() {
 
 void cancelEditMode() {
   uiMode = UI_VIEW;
+  debugPrintEditState("cancel");
   holdManualPage(PAGE_TIME);
 }
 
 void advanceEditField() {
   editField = static_cast<EditField>((editField + 1) % EDIT_COUNT);
+  debugPrintEditState("field");
 }
 
 void adjustEditField(int delta) {
@@ -430,6 +996,7 @@ void adjustEditField(int delta) {
     default:
       break;
   }
+  debugPrintEditState(delta > 0 ? "up" : "down");
 }
 
 ButtonId readButtonRaw() {
@@ -532,12 +1099,36 @@ void blankDisplayOutputs() {
   writeShiftRegisters(makeDigitRegisterValue(0, false), makeSegmentRegisterValue(0));
 }
 
+void runPowerOnDisplaySelfTest() {
+  if (!ENABLE_POWER_ON_DISPLAY_SELF_TEST) {
+    return;
+  }
+
+  const uint8_t allSegments = SEG_A | SEG_B | SEG_C | SEG_D |
+                              SEG_E | SEG_F | SEG_G | SEG_DP;
+
+  for (uint8_t pass = 0; pass < DISPLAY_SELF_TEST_PASSES; ++pass) {
+    for (uint8_t digit = 0; digit < DIGIT_COUNT; ++digit) {
+      writeShiftRegisters(
+        makeDigitRegisterValue(digit, true),
+        makeSegmentRegisterValue(allSegments)
+      );
+      delay(DISPLAY_SELF_TEST_STEP_MS);
+    }
+  }
+
+  blankDisplayOutputs();
+}
+
 void refreshDisplay() {
   unsigned long nowUs = micros();
   if (nowUs - lastRefreshUs < REFRESH_INTERVAL_US) {
     return;
   }
   lastRefreshUs = nowUs;
+
+  blankDisplayOutputs();
+  delayMicroseconds(DIGIT_BLANKING_US);
 
   writeShiftRegisters(
     makeDigitRegisterValue(currentDigit, true),
@@ -549,9 +1140,9 @@ void refreshDisplay() {
 void showTime(const ClockTime &now) {
   clearDisplayBuffer();
 
-  bool blink = (now.second % 2) == 0;
-  setTwoDigitValue(0, now.hour, blink);
-  setTwoDigitValue(2, now.minute, blink);
+  bool showSeparators = TIME_SEPARATOR_DOTS_ALWAYS_ON || (now.second % 2) == 0;
+  setTwoDigitValue(0, now.hour, showSeparators);
+  setTwoDigitValue(2, now.minute, showSeparators);
   setTwoDigitValue(4, now.second);
 }
 
@@ -664,6 +1255,21 @@ void updateSensors() {
   float h = dht.readHumidity();
   float t = dht.readTemperature();
 
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.print(F("[clock] dht temperature="));
+    if (isnan(t)) {
+      Serial.print(F("nan"));
+    } else {
+      Serial.print(t, 1);
+    }
+    Serial.print(F(" humidity="));
+    if (isnan(h)) {
+      Serial.println(F("nan"));
+    } else {
+      Serial.println(h, 1);
+    }
+  }
+
   if (!isnan(h)) {
     lastHumidity = h;
   }
@@ -726,6 +1332,8 @@ void handleButtonEvent() {
   eventButton = BUTTON_NONE;
   eventIsLong = false;
 
+  debugPrintButtonEvent(button, isLong);
+
   ClockTime now;
   bool clockHalted = false;
   bool rtcOk = readRtc(now, clockHalted) && !clockHalted;
@@ -761,17 +1369,17 @@ void handleButtonEvent() {
   Page page = getCurrentPage(millis());
 
   if (button == BUTTON_FUNCTION && !isLong) {
-    holdManualPage(static_cast<Page>((page + 1) % PAGE_COUNT));
+    holdManualPage(static_cast<Page>((page + 1) % VIEW_PAGE_COUNT));
     return;
   }
 
   if (button == BUTTON_UP && !isLong) {
-    holdManualPage(static_cast<Page>((page + PAGE_COUNT - 1) % PAGE_COUNT));
+    holdManualPage(static_cast<Page>((page + VIEW_PAGE_COUNT - 1) % VIEW_PAGE_COUNT));
     return;
   }
 
   if (button == BUTTON_DOWN && !isLong) {
-    holdManualPage(static_cast<Page>((page + 1) % PAGE_COUNT));
+    holdManualPage(static_cast<Page>((page + 1) % VIEW_PAGE_COUNT));
     return;
   }
 
@@ -797,7 +1405,21 @@ void updateDisplayContent() {
   Page page = getCurrentPage(nowMs);
   ClockTime now;
   bool clockHalted = false;
-  bool rtcOk = readRtc(now, clockHalted) && !clockHalted;
+  bool rtcReadOk = false;
+  bool shouldPollRtc = !hasCachedRtcTime ||
+                       lastRtcPollMs == 0 ||
+                       nowMs - lastRtcPollMs >= RTC_POLL_INTERVAL_MS;
+
+  if (shouldPollRtc) {
+    rtcReadOk = readRtc(now, clockHalted);
+    lastRtcPollMs = nowMs;
+  } else {
+    rtcReadOk = readCachedRtcTime(now);
+    clockHalted = false;
+  }
+
+  bool rtcOk = rtcReadOk && !clockHalted;
+  debugReportDisplayState(page, rtcOk, clockHalted, now);
 
   if (uiMode == UI_EDIT) {
     showEditPage();
@@ -840,16 +1462,55 @@ void setupRtc() {
 
   ClockTime now;
   bool clockHalted = false;
-  if (!readRtc(now, clockHalted) || clockHalted) {
-    writeRtc(compileTimeToClockTime());
+  bool rtcReadOk = readRtc(now, clockHalted);
+  ClockTime compileTime = compileTimeToClockTime();
+  bool rtcOlderThanCompile = rtcReadOk &&
+                             !clockHalted &&
+                             SET_RTC_FROM_COMPILE_TIME_IF_RTC_IS_OLDER &&
+                             isBefore(now, compileTime);
+
+  debugPrintRtcStatus("rtc boot", now, rtcReadOk, clockHalted);
+
+  if (FORCE_RTC_SET_FROM_COMPILE_TIME_ON_BOOT ||
+      !rtcReadOk ||
+      clockHalted ||
+      rtcOlderThanCompile) {
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print(F("[clock] rtc set compileTime reason="));
+      if (FORCE_RTC_SET_FROM_COMPILE_TIME_ON_BOOT) {
+        Serial.print(F("force"));
+      } else if (clockHalted) {
+        Serial.print(F("halted"));
+      } else if (rtcOlderThanCompile) {
+        Serial.print(F("older-than-compile"));
+      } else {
+        Serial.print(F("invalid"));
+      }
+      Serial.print(F(" time="));
+      debugPrintDateTime(compileTime);
+      Serial.println();
+    }
+    writeRtc(compileTime);
+
+    clockHalted = false;
+    rtcReadOk = readRtc(now, clockHalted);
+    debugPrintRtcStatus("rtc after set", now, rtcReadOk, clockHalted);
   }
 
-  // If you want to set a fixed time manually, replace the write below, upload once, then restore:
-  // ClockTime fixed = {2026, 4, 6, 1, 12, 0, 0};
-  // writeRtc(fixed);
+  // For manual calibration, open Serial Monitor at 115200 and send:
+  // SET 2026-04-28 23:05:00
 }
 
 void setup() {
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.begin(SERIAL_DEBUG_BAUD);
+    delay(100);
+    Serial.println();
+    Serial.println(F("[clock] boot"));
+    debugPrintConfig();
+    debugPrintSerialHelp();
+  }
+
   pinMode(SHIFT_DATA_PIN, OUTPUT);
   pinMode(SHIFT_CLOCK_PIN, OUTPUT);
   pinMode(SHIFT_LATCH_PIN, OUTPUT);
@@ -862,8 +1523,11 @@ void setup() {
   }
 
   blankDisplayOutputs();
+  runPowerOnDisplaySelfTest();
 
-  dht.begin();
+  if (ENABLE_SENSOR_PAGES) {
+    dht.begin();
+  }
   setupRtc();
 }
 
@@ -871,6 +1535,9 @@ void loop() {
   refreshDisplay();
   updateButtons();
   handleButtonEvent();
-  updateSensors();
+  updateSerialCommands();
+  if (ENABLE_SENSOR_PAGES) {
+    updateSensors();
+  }
   updateDisplayContent();
 }

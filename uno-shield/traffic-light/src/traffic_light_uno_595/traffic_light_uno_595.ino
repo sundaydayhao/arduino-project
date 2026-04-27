@@ -32,8 +32,8 @@ void applySnapshot(const IntersectionSnapshot& snapshot) {
   lampDriver.applySnapshot(snapshot);
 
   displayScanner.setNumber(Direction::North, snapshot.countdownSeconds[toIndex(Direction::North)]);
-  displayScanner.setNumber(Direction::South, snapshot.countdownSeconds[toIndex(Direction::South)]);
   displayScanner.setNumber(Direction::East, snapshot.countdownSeconds[toIndex(Direction::East)]);
+  displayScanner.setNumber(Direction::South, snapshot.countdownSeconds[toIndex(Direction::South)]);
   displayScanner.setNumber(Direction::West, snapshot.countdownSeconds[toIndex(Direction::West)]);
 }
 
@@ -42,10 +42,10 @@ void printSnapshot(const IntersectionSnapshot& snapshot) {
   Serial.print(phaseName(intersectionController.phase()));
   Serial.print(" | N=");
   Serial.print(snapshot.countdownSeconds[toIndex(Direction::North)]);
-  Serial.print(" S=");
-  Serial.print(snapshot.countdownSeconds[toIndex(Direction::South)]);
   Serial.print(" E=");
   Serial.print(snapshot.countdownSeconds[toIndex(Direction::East)]);
+  Serial.print(" S=");
+  Serial.print(snapshot.countdownSeconds[toIndex(Direction::South)]);
   Serial.print(" W=");
   Serial.print(snapshot.countdownSeconds[toIndex(Direction::West)]);
   Serial.print(" | Buzzer=");
