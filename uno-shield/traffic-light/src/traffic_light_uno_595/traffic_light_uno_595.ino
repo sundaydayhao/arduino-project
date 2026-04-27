@@ -37,6 +37,25 @@ void applySnapshot(const IntersectionSnapshot& snapshot) {
   displayScanner.setNumber(Direction::West, snapshot.countdownSeconds[toIndex(Direction::West)]);
 }
 
+void runDisplayDigitTest(uint32_t nowMs) {
+  static uint32_t lastStepMs = 0UL;
+  static uint8_t activeDigit = BoardConfig::kDigitCount;
+
+  if (activeDigit != BoardConfig::kDigitCount &&
+      (nowMs - lastStepMs) < BoardConfig::kDisplayDigitTestHoldMs) {
+    return;
+  }
+
+  lastStepMs = nowMs;
+  activeDigit = (activeDigit == BoardConfig::kDigitCount) ? 0U : ((activeDigit + 1U) % BoardConfig::kDigitCount);
+
+  displayScanner.clear();
+  displayScanner.setDigitGlyph(activeDigit, static_cast<int8_t>(activeDigit));
+
+  Serial.print("Display digit test: digit ");
+  Serial.println(activeDigit);
+}
+
 void printSnapshot(const IntersectionSnapshot& snapshot) {
   Serial.print("Phase=");
   Serial.print(phaseName(intersectionController.phase()));
@@ -64,7 +83,13 @@ void setup() {
   displayScanner.begin();
 
   intersectionController.begin(millis());
-  applySnapshot(intersectionController.snapshot());
+  if (BoardConfig::kDisplayDigitTestMode) {
+    lampDriver.clear();
+    runDisplayDigitTest(millis());
+    Serial.println("Display digit test mode: ON");
+  } else {
+    applySnapshot(intersectionController.snapshot());
+  }
   displayScanner.service(micros());
 
   Serial.println("Arduino Uno + 4x74HC595 traffic light skeleton");
@@ -73,6 +98,13 @@ void setup() {
 
 void loop() {
   const uint32_t nowMs = millis();
+
+  if (BoardConfig::kDisplayDigitTestMode) {
+    runDisplayDigitTest(nowMs);
+    displayScanner.service(micros());
+    return;
+  }
+
   const bool stageChanged = intersectionController.update(nowMs);
 
   applySnapshot(intersectionController.snapshot());
